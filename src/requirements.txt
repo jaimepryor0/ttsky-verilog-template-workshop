@@ -1,0 +1,11 @@
+numpy
+scipy
+sympy
+matplotlib
+pandas
+ipympl
+ipython
+ipywidgets
+mplcursors
+sounddevice
+soundfile
