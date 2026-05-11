@@ -62,7 +62,7 @@ module vocoder(clk, rst_n, start, done, mic, saw, out);
     ///////////////////////////////////////
     // Filter slot indices
     //   0..2 = mic bandpass (B1, B2, B3)
-    //   3..5 = envelope LPF (E1, E2, E3) reading rectified bf_y
+    //   3..5 = envelope LPF (E1, E2, E3) reading rectified mic-BPF outputs
     //   6..8 = saw bandpass (B1, B2, B3) -- same coeffs as 0..2
     ///////////////////////////////////////
 
@@ -73,16 +73,23 @@ module vocoder(clk, rst_n, start, done, mic, saw, out);
     reg signed [7:0] s1 [0:8];
     reg signed [7:0] s2 [0:8];
 
-    // --- Filter outputs held for downstream consumption ---
-    reg signed [7:0] bf_y  [0:2];
-    reg signed [7:0] env_y [0:2];
-    reg signed [7:0] sbf_y;
+    // --- Shared per-band output slot --------------------------------------
+    // For band i, slot[i] holds:
+    //   - the mic BPF result (bf_y[i]) from end of biquad i until end of
+    //     biquad i+3, where the envelope filter consumes it via `rect`;
+    //   - the envelope LPF result (env_y[i]) from end of biquad i+3 until
+    //     phase 4 of biquad i+6, where the SBF post-multiply reads it.
+    // The two live ranges are disjoint, so a single 3-entry array carries
+    // both. `sbf_y` is gone entirely -- the post-mul reads y_r directly,
+    // since y_r still holds the saw-BPF output through the post-mul phase.
+    reg signed [7:0] slot [0:2];
 
     // --- Per-filter MAC intermediates ---
     // Phase 0's product is folded into `y_r` directly (no xb0_r). Phase 1
-    // captures the b2 product into xb2_r; phase 2 captures the a1 product
-    // into ya1_r.
-    reg signed [7:0] xb2_r, ya1_r;
+    // captures the b2 product into xb2_r. The a1 product is consumed in
+    // the same cycle it's produced (phase 2) by writing s1 there, so we
+    // don't need a separate ya1_r register either.
+    reg signed [7:0] xb2_r;
     reg signed [7:0] y_r;
 
     // --- Output accumulator ---
@@ -104,10 +111,12 @@ module vocoder(clk, rst_n, start, done, mic, saw, out);
     reg        [7:0] m_b;     // multiplier register (B), shifts right each iteration
     reg signed [7:0] m_a;     // multiplicand (A), held throughout
 
-    // Rectify (abs) of mic-BPF outputs -- feeds envelope LPF inputs
-    wire signed [7:0] rect0 = bf_y[0][7] ? -bf_y[0] : bf_y[0];
-    wire signed [7:0] rect1 = bf_y[1][7] ? -bf_y[1] : bf_y[1];
-    wire signed [7:0] rect2 = bf_y[2][7] ? -bf_y[2] : bf_y[2];
+    // Rectify (abs) of mic-BPF outputs -- feeds envelope LPF inputs.
+    // At the moment these wires are sampled (during filt_idx 3..5) the
+    // shared `slot[]` still holds the mic BPF results from filt_idx 0..2.
+    wire signed [7:0] rect0 = slot[0][7] ? -slot[0] : slot[0];
+    wire signed [7:0] rect1 = slot[1][7] ? -slot[1] : slot[1];
+    wire signed [7:0] rect2 = slot[2][7] ? -slot[2] : slot[2];
 
     // --- Coefficient ROM (combinational mux on filt_idx) ---
     reg signed [7:0] b0_sel, b2_sel, a1_sel, a2_sel;
@@ -135,11 +144,13 @@ module vocoder(clk, rst_n, start, done, mic, saw, out);
     end
 
     // --- Operand selection per phase ---
-    //   phase 0  : in_sel * b0        (Q1.7 * Q2.6) -- also folds in `+ s1`
-    //   phase 1  : in_sel * b2        (Q1.7 * Q2.6)
-    //   phase 2  : y_r    * a1        (Q1.7 * Q2.6)
-    //   phase 3  : y_r    * a2        (Q1.7 * Q2.6) -- ends biquad
-    //   phase 4  : env_y[i-6] * sbf_y (Q1.7 * Q1.7) -- SBF post-mul only
+    //   phase 0  : in_sel * b0          (Q1.7 * Q2.6) -- also folds in `+ s1`
+    //   phase 1  : in_sel * b2          (Q1.7 * Q2.6)
+    //   phase 2  : y_r    * a1          (Q1.7 * Q2.6) -- s1 updated this cycle
+    //   phase 3  : y_r    * a2          (Q1.7 * Q2.6) -- s2 updated, ends biquad
+    //   phase 4  : slot[i-6] * y_r      (Q1.7 * Q1.7) -- SBF post-mul; y_r
+    //                                                     still holds the saw
+    //                                                     BPF output from phase 3
     reg signed [7:0] op_a, op_b;
     always @* begin
         case (mac_phase)
@@ -149,10 +160,10 @@ module vocoder(clk, rst_n, start, done, mic, saw, out);
             3'd3: begin op_a = y_r;    op_b = a2_sel; end
             3'd4: begin
                 case (filt_idx)
-                    4'd6:    begin op_a = env_y[0]; op_b = sbf_y; end
-                    4'd7:    begin op_a = env_y[1]; op_b = sbf_y; end
-                    4'd8:    begin op_a = env_y[2]; op_b = sbf_y; end
-                    default: begin op_a = 8'sd0;    op_b = 8'sd0; end
+                    4'd6:    begin op_a = slot[0]; op_b = y_r; end
+                    4'd7:    begin op_a = slot[1]; op_b = y_r; end
+                    4'd8:    begin op_a = slot[2]; op_b = y_r; end
+                    default: begin op_a = 8'sd0;   op_b = 8'sd0; end
                 endcase
             end
             default: begin op_a = 8'sd0; op_b = 8'sd0; end
@@ -190,12 +201,12 @@ module vocoder(clk, rst_n, start, done, mic, saw, out);
     // --- FSM ---
     //
     // Reset wiring is deliberately limited to the control path (state, busy,
-    // counters, multiplier, and `out`). The filter-state arrays (s1/s2/bf_y/
-    // env_y/sbf_y) and per-MAC pipeline registers are *not* reset, which lets
-    // synthesis map them to plain DFFs (DFXTP) instead of the larger
-    // reset-flop cells (DFRTP). The first sample or two after power-up will
-    // use whatever values the flops booted into, but the IIR filters mix that
-    // garbage out within a handful of samples -- inaudible on an audio path.
+    // counters, multiplier, and `out`). The filter-state arrays (s1/s2/slot)
+    // and per-MAC pipeline registers are *not* reset, which lets synthesis
+    // map them to plain DFFs (DFXTP) instead of the larger reset-flop cells
+    // (DFRTP). The first sample or two after power-up will use whatever
+    // values the flops booted into, but the IIR filters mix that garbage out
+    // within a handful of samples -- inaudible on an audio path.
     always @(posedge clk) begin
         if (~rst_n) begin
             filt_idx  <= 4'd0;
@@ -272,21 +283,27 @@ module vocoder(clk, rst_n, start, done, mic, saw, out);
                                 // design.)
                                 3'd0: y_r   <= prod_trunc_filt + s1[filt_idx];
                                 3'd1: xb2_r <= prod_trunc_filt;
-                                3'd2: ya1_r <= prod_trunc_filt;
+                                // Phase 2 (a1*y): write the new s1 *now* using
+                                // the fresh a1 product; saves the ya1_r reg.
+                                // For an envelope filter (filt_idx 3..5) a1*y
+                                // is the only non-zero term that touches s1,
+                                // and s2 stays at its previous value.
+                                // s1_new = s2_old - ya1 (b1 = 0 in this design).
+                                3'd2: s1[filt_idx] <= s2[filt_idx] - prod_trunc_filt;
                                 3'd3: begin
                                     // ya2 == prod_trunc_filt this cycle.
-                                    // s1 normally is xb1 - ya1 + s2, but
-                                    // xb1 = b1*x = 0 here.
-                                    s1[filt_idx] <= s2[filt_idx] - ya1_r;
                                     s2[filt_idx] <= xb2_r - prod_trunc_filt;
+                                    // Per-biquad output capture into the shared
+                                    // slot[]. Saw-BPF results (filt_idx 6..8)
+                                    // don't need a slot at all -- y_r itself
+                                    // is the post-mul operand next cycle.
                                     case (filt_idx)
-                                        4'd0:             bf_y[0]  <= y_r;
-                                        4'd1:             bf_y[1]  <= y_r;
-                                        4'd2:             bf_y[2]  <= y_r;
-                                        4'd3:             env_y[0] <= y_r;
-                                        4'd4:             env_y[1] <= y_r;
-                                        4'd5:             env_y[2] <= y_r;
-                                        4'd6, 4'd7, 4'd8: sbf_y    <= y_r;
+                                        4'd0:    slot[0] <= y_r;
+                                        4'd1:    slot[1] <= y_r;
+                                        4'd2:    slot[2] <= y_r;
+                                        4'd3:    slot[0] <= y_r;
+                                        4'd4:    slot[1] <= y_r;
+                                        4'd5:    slot[2] <= y_r;
                                         default: ;
                                     endcase
                                 end
