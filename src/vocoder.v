@@ -92,24 +92,27 @@ module vocoder(clk, rst_n, start, done, mic, saw, out);
     reg signed [7:0] xb2_r;
     reg signed [7:0] y_r;
 
-    // --- Output accumulator ---
-    // 8-bit modular addition produces the same low 8 bits as the wider
-    // accumulator we used to keep; out truncates to acc[7:0] anyway.
-    reg signed [7:0] acc;
-
     // --- Control ---
     reg [3:0] filt_idx;   // 0..8
-    reg [2:0] mac_phase;  // 0..5 (0..3 = MAC, 4 = post-mul, 5 = output)
+    reg [2:0] mac_phase;  // 0..4 (0..3 = MAC, 4 = post-mul / final accumulate)
     reg [3:0] sub_cnt;    // 0..8: 0 = operand setup, 1..8 = serial-mult iterations
     reg       busy;
+
+    // The output register doubles as the per-sample post-mul accumulator: it
+    // gets cleared to 0 on `start`, accumulates env*sbf products at phase 4,
+    // and is left holding the new sample the moment `done` pulses.
 
     // --- Serial signed multiplier state ---
     // Standard "add and arithmetic-shift-right" with Booth sign-correction on
     // the multiplier's MSB. After 8 iterations the 16-bit product sits in
-    // {m_acc[7:0], m_b[7:0]}.
-    reg signed [8:0] m_acc;   // 9-bit accumulator (sign extended top of partial product)
+    // {m_acc, m_b}. m_acc is stored at 8 bits and sign-extended to 9 bits
+    // on the way into the add; the high bit of the 9-bit partial sum is
+    // always the same as bit 7 after each arith-shift-right, so storing the
+    // extra bit would be redundant. m_a is not registered -- op_a is stable
+    // across the multiplier's 9 cycles (mac_phase / filt_idx only change at
+    // sub_cnt==8), so it's fed combinationally.
+    reg signed [7:0] m_acc;   // upper half of the partial product
     reg        [7:0] m_b;     // multiplier register (B), shifts right each iteration
-    reg signed [7:0] m_a;     // multiplicand (A), held throughout
 
     // Rectify (abs) of mic-BPF outputs -- feeds envelope LPF inputs.
     // At the moment these wires are sampled (during filt_idx 3..5) the
@@ -175,25 +178,28 @@ module vocoder(clk, rst_n, start, done, mic, saw, out);
     // On that cycle we SUBTRACT instead of ADD -- this turns the unsigned
     // sequential algorithm into a signed one (Booth's MSB correction).
     wire is_last_iter = (sub_cnt == 4'd8);
-    wire signed [8:0] m_a_sext = {m_a[7], m_a};
+    wire signed [8:0] m_a_sext   = {op_a[7], op_a};
+    wire signed [8:0] m_acc_sext = {m_acc[7], m_acc};
     reg  signed [8:0] m_new_top;
     always @* begin
         if (m_b[0]) begin
-            if (is_last_iter) m_new_top = m_acc - m_a_sext;
-            else              m_new_top = m_acc + m_a_sext;
+            if (is_last_iter) m_new_top = m_acc_sext - m_a_sext;
+            else              m_new_top = m_acc_sext + m_a_sext;
         end else
-            m_new_top = m_acc;
+            m_new_top = m_acc_sext;
     end
 
     // Post-shift values of acc and b (combinational; what gets latched on
-    // an iteration cycle).
-    wire signed [8:0] m_acc_after = {m_new_top[8], m_new_top[8:1]};
+    // an iteration cycle). m_new_top[8:1] is the arith-shifted result --
+    // its MSB is the sign of the partial sum, which we re-extend on the
+    // next iteration via m_acc_sext above.
+    wire signed [7:0] m_acc_after = m_new_top[8:1];
     wire        [7:0] m_b_after   = {m_new_top[0], m_b[7:1]};
 
     // Full 16-bit product, valid at the end of sub_cnt=8. Slice differently
     // for the filter MAC (Q3.13 -> Q1.7) vs the env*saw post-mul (Q2.14 -> Q1.7).
     /* verilator lint_off UNUSEDSIGNAL */
-    wire signed [15:0] mul_prod = {m_acc_after[7:0], m_b_after[7:0]};
+    wire signed [15:0] mul_prod = {m_acc_after, m_b_after};
     /* verilator lint_on UNUSEDSIGNAL */
     wire signed [7:0] prod_trunc_filt   = mul_prod[13:6];
     wire signed [7:0] prod_trunc_envsaw = mul_prod[14:7];
@@ -215,9 +221,8 @@ module vocoder(clk, rst_n, start, done, mic, saw, out);
             busy      <= 1'b0;
             done      <= 1'b0;
             out       <= 8'sd0;
-            m_acc     <= 9'sd0;
+            m_acc     <= 8'sd0;
             m_b       <= 8'd0;
-            m_a       <= 8'sd0;
         end else begin
             done <= 1'b0;
             if (!busy) begin
@@ -228,102 +233,92 @@ module vocoder(clk, rst_n, start, done, mic, saw, out);
                     sub_cnt   <= 4'd0;
                     mic_r     <= mic;
                     saw_r     <= saw;
-                    acc       <= 8'sd0;
+                    out       <= 8'sd0;     // also the post-mul accumulator
                 end
             end else begin
-                if (mac_phase == 3'd5) begin
-                    // Output phase: register out, pulse done, return to idle.
-                    out       <= acc;
-                    done      <= 1'b1;
-                    busy      <= 1'b0;
-                    filt_idx  <= 4'd0;
-                    mac_phase <= 3'd0;
-                    sub_cnt   <= 4'd0;
+                // MAC phase (0..3) or post-mul phase (4). Each spans
+                // sub_cnt = 0 (setup) followed by sub_cnt = 1..8 (8 iter).
+                if (sub_cnt == 4'd0) begin
+                    // Setup: latch the multiplier register, clear accumulator,
+                    // begin iterations. (m_a is no longer registered -- op_a
+                    // is read combinationally throughout the multiply.)
+                    m_acc   <= 8'sd0;
+                    m_b     <= op_b;
+                    sub_cnt <= 4'd1;
+                end else if (sub_cnt != 4'd8) begin
+                    // Iteration (not last): update {acc, b} = arith-shift-right
+                    m_acc   <= m_acc_after;
+                    m_b     <= m_b_after;
+                    sub_cnt <= sub_cnt + 4'd1;
                 end else begin
-                    // MAC phase (0..3) or post-mul phase (4). Each spans
-                    // sub_cnt = 0 (setup) followed by sub_cnt = 1..8
-                    // (8 multiplier iterations).
-                    if (sub_cnt == 4'd0) begin
-                        // Setup: latch operands, clear accumulator, begin iterations.
-                        m_acc   <= 9'sd0;
-                        m_b     <= op_b;
-                        m_a     <= op_a;
-                        sub_cnt <= 4'd1;
-                    end else if (sub_cnt != 4'd8) begin
-                        // Iteration (not last): update {acc, b} = arith-shift-right
-                        m_acc   <= m_acc_after;
-                        m_b     <= m_b_after;
-                        sub_cnt <= sub_cnt + 4'd1;
-                    end else begin
-                        // sub_cnt == 8: final iteration. Latch final shift and
-                        // capture the resulting 16-bit product.
-                        m_acc   <= m_acc_after;
-                        m_b     <= m_b_after;
-                        sub_cnt <= 4'd0;
+                    // sub_cnt == 8: final iteration. Latch final shift and
+                    // capture the resulting 16-bit product.
+                    m_acc   <= m_acc_after;
+                    m_b     <= m_b_after;
+                    sub_cnt <= 4'd0;
 
-                        // Phase-specific bookkeeping and transition.
-                        if (mac_phase == 3'd4) begin
-                            // Post-mul: accumulate env*sbf into output sum.
-                            // 8-bit modular addition; the wide output truncates
-                            // to acc[7:0] regardless of growth.
-                            acc <= acc + prod_trunc_envsaw;
-                            if (filt_idx == 4'd8) begin
-                                mac_phase <= 3'd5;
+                    // Phase-specific bookkeeping and transition.
+                    if (mac_phase == 3'd4) begin
+                        // Post-mul: accumulate env*sbf into the output reg.
+                        // 8-bit modular addition; downstream truncates to
+                        // 8 bits anyway. The last accumulation (filt_idx==8)
+                        // also pulses done and returns to idle in one cycle.
+                        out <= out + prod_trunc_envsaw;
+                        if (filt_idx == 4'd8) begin
+                            done      <= 1'b1;
+                            busy      <= 1'b0;
+                            filt_idx  <= 4'd0;
+                            mac_phase <= 3'd0;
+                        end else begin
+                            filt_idx  <= filt_idx + 4'd1;
+                            mac_phase <= 3'd0;
+                        end
+                    end else begin
+                        // MAC phase 0..3 -- capture product and update state.
+                        case (mac_phase)
+                            // Phase 0 (b0*x): fold the trailing `+ s1` into
+                            // the same cycle so the b0 product never needs
+                            // its own holding register. (b1 phase is omitted
+                            // entirely -- b1 is zero in this design.)
+                            3'd0: y_r   <= prod_trunc_filt + s1[filt_idx];
+                            3'd1: xb2_r <= prod_trunc_filt;
+                            // Phase 2 (a1*y): write the new s1 *now* using
+                            // the fresh a1 product; saves the ya1_r reg.
+                            // s1_new = s2_old - ya1 (b1 = 0 in this design).
+                            3'd2: s1[filt_idx] <= s2[filt_idx] - prod_trunc_filt;
+                            3'd3: begin
+                                // ya2 == prod_trunc_filt this cycle.
+                                s2[filt_idx] <= xb2_r - prod_trunc_filt;
+                                // Per-biquad output capture into the shared
+                                // slot[]. Saw-BPF results (filt_idx 6..8)
+                                // don't need a slot at all -- y_r itself is
+                                // the post-mul operand next cycle.
+                                case (filt_idx)
+                                    4'd0:    slot[0] <= y_r;
+                                    4'd1:    slot[1] <= y_r;
+                                    4'd2:    slot[2] <= y_r;
+                                    4'd3:    slot[0] <= y_r;
+                                    4'd4:    slot[1] <= y_r;
+                                    4'd5:    slot[2] <= y_r;
+                                    default: ;
+                                endcase
+                            end
+                            default: ;
+                        endcase
+
+                        if (mac_phase < 3'd3) begin
+                            mac_phase <= mac_phase + 3'd1;
+                        end else begin
+                            // mac_phase == 3: end of biquad
+                            if (filt_idx >= 4'd6) begin
+                                mac_phase <= 3'd4;  // SBF needs post-mul
                             end else begin
                                 filt_idx  <= filt_idx + 4'd1;
                                 mac_phase <= 3'd0;
                             end
-                        end else begin
-                            // MAC phase 0..3 -- capture product and update state.
-                            case (mac_phase)
-                                // Phase 0 (b0*x): fold the trailing `+ s1` into
-                                // the same cycle so the b0 product never needs
-                                // its own holding register. (b1 phase is
-                                // omitted entirely -- b1 is zero in this
-                                // design.)
-                                3'd0: y_r   <= prod_trunc_filt + s1[filt_idx];
-                                3'd1: xb2_r <= prod_trunc_filt;
-                                // Phase 2 (a1*y): write the new s1 *now* using
-                                // the fresh a1 product; saves the ya1_r reg.
-                                // For an envelope filter (filt_idx 3..5) a1*y
-                                // is the only non-zero term that touches s1,
-                                // and s2 stays at its previous value.
-                                // s1_new = s2_old - ya1 (b1 = 0 in this design).
-                                3'd2: s1[filt_idx] <= s2[filt_idx] - prod_trunc_filt;
-                                3'd3: begin
-                                    // ya2 == prod_trunc_filt this cycle.
-                                    s2[filt_idx] <= xb2_r - prod_trunc_filt;
-                                    // Per-biquad output capture into the shared
-                                    // slot[]. Saw-BPF results (filt_idx 6..8)
-                                    // don't need a slot at all -- y_r itself
-                                    // is the post-mul operand next cycle.
-                                    case (filt_idx)
-                                        4'd0:    slot[0] <= y_r;
-                                        4'd1:    slot[1] <= y_r;
-                                        4'd2:    slot[2] <= y_r;
-                                        4'd3:    slot[0] <= y_r;
-                                        4'd4:    slot[1] <= y_r;
-                                        4'd5:    slot[2] <= y_r;
-                                        default: ;
-                                    endcase
-                                end
-                                default: ;
-                            endcase
-
-                            if (mac_phase < 3'd3) begin
-                                mac_phase <= mac_phase + 3'd1;
-                            end else begin
-                                // mac_phase == 3: end of biquad
-                                if (filt_idx >= 4'd6) begin
-                                    mac_phase <= 3'd4;  // SBF needs post-mul
-                                end else begin
-                                    filt_idx  <= filt_idx + 4'd1;
-                                    mac_phase <= 3'd0;
-                                end
-                            end
                         end
                     end
-                end
+                    end
             end
         end
     end
