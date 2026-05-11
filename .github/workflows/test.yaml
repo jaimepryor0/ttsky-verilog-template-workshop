@@ -3,46 +3,67 @@ on: [push, workflow_dispatch]
 jobs:
   test:
     runs-on: ubuntu-24.04
+    env:
+      VERILATOR_VERSION: v5.032
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - name: Install iverilog
-        shell: bash
-        run: sudo apt-get update && sudo apt-get install -y iverilog
+      # Ubuntu 24.04's apt verilator (~5.018) is too old for cocotb 2.x --
+      # the generated wrapper references VerilatedVpi::clearEvalNeeded which
+      # only exists in verilator 5.024+. Build from source once and cache.
+      - name: Cache verilator install
+        id: cache-verilator
+        uses: actions/cache@v4
+        with:
+          path: ~/verilator
+          key: verilator-${{ env.VERILATOR_VERSION }}-${{ runner.os }}
 
-      # Set Python up and install cocotb
+      - name: Build verilator from source
+        if: steps.cache-verilator.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            autoconf flex bison libfl-dev help2man g++ make perl python3
+          git clone --depth 1 --branch "$VERILATOR_VERSION" \
+            https://github.com/verilator/verilator.git verilator-src
+          cd verilator-src
+          autoconf
+          ./configure --prefix=$HOME/verilator
+          make -j"$(nproc)"
+          make install
+
+      - name: Put verilator on PATH
+        run: echo "$HOME/verilator/bin" >> "$GITHUB_PATH"
+
       - name: Setup python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.13'
 
       - name: Install Python packages
-        shell: bash
         run: pip install -r test/requirements.txt
 
-      - name: Run tests
+      - name: Verilator lint
         run: |
-          cd test
-          make clean
-          make
-          # make will return success even if the test fails, so check for failure in the results.xml
-          ! grep failure results.xml
+          verilator --lint-only -Wall \
+            --top-module tt_um_JAIMEPRYOR0_VGA_YAY \
+            src/project.v src/spi_master.v src/vocoder.v src/filter.v src/pitch.v
 
-      - name: Test Summary
-        uses: test-summary/action@v2.3
-        with:
-          paths: "test/results.xml"
-        if: always()
+      - name: Vocoder DSP test (test_vocoder.py)
+        run: python test/test_vocoder.py
 
-      - name: upload waveform and test results
-        if: success() || failure()
+      - name: SPI master test (test_spi.py)
+        run: python test/test_spi.py
+
+      - name: Full chip integration test (test_chip.py, 5 pitches)
+        run: python test/test_chip.py
+
+      - name: Upload sim build artefacts
+        if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: test-results
-          path: |
-            test/tb.fst
-            test/results.xml
-            test/output/*
+          name: sim-build
+          path: test/sim_build

@@ -13,3 +13,4 @@ test/results.xml
 test/gate_level_netlist.v
 src/.vscode
 src/obj_dir/**
+src/debug_out
