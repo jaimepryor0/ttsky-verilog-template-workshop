@@ -3,14 +3,40 @@ on: [push, workflow_dispatch]
 jobs:
   test:
     runs-on: ubuntu-24.04
+    env:
+      VERILATOR_VERSION: v5.032
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - name: Install verilator
-        run: sudo apt-get update && sudo apt-get install -y verilator
+      # Ubuntu 24.04's apt verilator (~5.018) is too old for cocotb 2.x --
+      # the generated wrapper references VerilatedVpi::clearEvalNeeded which
+      # only exists in verilator 5.024+. Build from source once and cache.
+      - name: Cache verilator install
+        id: cache-verilator
+        uses: actions/cache@v4
+        with:
+          path: ~/verilator
+          key: verilator-${{ env.VERILATOR_VERSION }}-${{ runner.os }}
+
+      - name: Build verilator from source
+        if: steps.cache-verilator.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            autoconf flex bison libfl-dev help2man g++ make perl python3
+          git clone --depth 1 --branch "$VERILATOR_VERSION" \
+            https://github.com/verilator/verilator.git verilator-src
+          cd verilator-src
+          autoconf
+          ./configure --prefix=$HOME/verilator
+          make -j"$(nproc)"
+          make install
+
+      - name: Put verilator on PATH
+        run: echo "$HOME/verilator/bin" >> "$GITHUB_PATH"
 
       - name: Setup python
         uses: actions/setup-python@v5
