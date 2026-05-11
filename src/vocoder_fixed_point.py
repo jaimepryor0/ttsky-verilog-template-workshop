@@ -79,10 +79,14 @@ def _envelope_detect(band: hw_int) -> hw_int:
     return z
 
 
-def _generate_sawtooth(n_samples: int) -> hw_int:
-    """Rising 500 Hz sawtooth in (-1, 1), quantised to DATA_FRAC hw_int."""
+def _generate_sawtooth(n_samples: int, freq: float = SAW_FREQ) -> hw_int:
+    """Rising sawtooth in (-1, 1), quantised to DATA_FRAC hw_int.
+
+    `freq` defaults to SAW_FREQ. The chip's `pitch_byte` (ui_in) maps to
+    a frequency via  f = FS * pitch_byte / 256  (see pitch.v).
+    """
     t = np.arange(n_samples) / FS
-    saw = sig.sawtooth(2.0 * np.pi * SAW_FREQ * t, width=1)
+    saw = sig.sawtooth(2.0 * np.pi * freq * t, width=1)
     return hw_int.from_float(saw, bits=ADC_BITS, frac_bits=DATA_FRAC)
 
 

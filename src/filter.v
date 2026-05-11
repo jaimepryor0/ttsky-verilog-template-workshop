@@ -1,6 +1,6 @@
 `default_nettype none
 
-module filter(clk, rst_n, in, out);
+module filter(clk, rst_n, en, in, out);
 // Direct Form II Transposed biquad, normalised (a0 = 1).
 //
 // Matches filter_df2_hw in src/filter_df2.py:
@@ -26,6 +26,7 @@ module filter(clk, rst_n, in, out);
 
     input  wire                     clk;
     input  wire                     rst_n;
+    input  wire                     en;      // 1-cycle pulse to advance state
     input  wire signed [DATA_W-1:0] in;
     output wire signed [DATA_W-1:0] out;
 
@@ -52,11 +53,11 @@ module filter(clk, rst_n, in, out);
     // Assign output
     assign out = xb0 + s1;
 
-    always @(posedge clk) begin // synchronous reset
+    always @(posedge clk) begin // synchronous reset, clock-enabled
         if (~rst_n) begin
             s1 <= 0;
             s2 <= 0;
-        end else begin
+        end else if (en) begin
             // Update state registers
             s1 <= xb1 - ya1 + s2;
             s2 <= xb2 - ya2;

@@ -35,6 +35,12 @@ module tb_vocoder ();
     reg  signed [15:0] saw = 16'sd0;
     wire signed [15:0] out;
 
+    // The chip-level integration only pulses `en` at audio-sample rate, but
+    // cocotb can drive this directly to test both:
+    //   - en tied high (one sample per clock)
+    //   - random-gated en (idle cycles between sample-advancing pulses)
+    reg en = 1'b1;
+
 `ifndef VERILATOR
     initial begin
         $dumpfile("tb_vocoder.fst");
@@ -53,6 +59,7 @@ module tb_vocoder ();
     ) dut (
         .clk  (clk),
         .rst_n(rst_n),
+        .en   (en),
         .mic  (mic),
         .saw  (saw),
         .out  (out)

@@ -55,7 +55,7 @@ def _design_parameters() -> dict[str, int]:
 
 import cocotb  # noqa: E402
 from cocotb.clock import Clock  # noqa: E402
-from cocotb.triggers import ClockCycles, FallingEdge, Timer  # noqa: E402
+from cocotb.triggers import ClockCycles, FallingEdge, RisingEdge, Timer  # noqa: E402
 
 
 CLOCK_PERIOD_NS = 100   # one clock = one audio sample
@@ -120,6 +120,70 @@ async def vocoder_matches_python(dut):
         )
 
     dut._log.info(f"All {n_samples} samples match Python reference exactly.")
+
+
+@cocotb.test()
+async def vocoder_matches_python_with_random_en(dut):
+    """Same comparison but with random idle cycles between sample-advancing
+    `en` pulses. Verifies the clock-enable plumbing keeps state in sync no
+    matter how many chip cycles separate audio samples."""
+    import random
+    random.seed(0xCAFE)
+
+    cocotb.start_soon(Clock(dut.clk, CLOCK_PERIOD_NS, unit="ns").start())
+
+    # Reset
+    dut.rst_n.value = 0
+    dut.mic.value   = 0
+    dut.saw.value   = 0
+    dut.en.value    = 0
+    await ClockCycles(dut.clk, 5)
+    dut.rst_n.value = 1
+    await FallingEdge(dut.clk)
+
+    audio_hw  = _build_test_signal()
+    n_samples = len(audio_hw)
+    saw_hw    = vfp._generate_sawtooth(n_samples)
+    expected  = vfp.process(audio_hw, saw_hw)
+
+    audio_int = audio_hw.val.astype(np.int64)
+    saw_int   = saw_hw.val.astype(np.int64)
+    exp_int   = expected.val.astype(np.int64)
+
+    y_dut = np.zeros(n_samples, dtype=np.int64)
+    for n in range(n_samples):
+        # Drive the new sample, hold en low so idle posedges don't advance state
+        dut.mic.value = int(audio_int[n])
+        dut.saw.value = int(saw_int[n])
+        dut.en.value  = 0
+
+        for _ in range(random.randint(0, 4)):
+            await ClockCycles(dut.clk, 1)  # back to next falling edge, en=0 throughout
+
+        # Combinational `out` reflects (mic[n], saw[n], state_n) = y[n]
+        await Timer(1, unit="ns")
+        y_dut[n] = dut.out.value.to_signed()
+
+        # Pulse en for exactly one rising edge to advance state
+        dut.en.value = 1
+        await RisingEdge(dut.clk)
+        dut.en.value = 0
+        await FallingEdge(dut.clk)
+
+    diff = y_dut - exp_int
+    bad  = np.flatnonzero(diff)
+    if bad.size:
+        head = bad[:8]
+        details = "\n".join(
+            f"  n={i:5d}: dut={y_dut[i]:7d}  ref={exp_int[i]:7d}  delta={diff[i]:+d}"
+            for i in head
+        )
+        raise AssertionError(
+            f"DUT (random-en) differs from Python reference at {bad.size}/{n_samples} "
+            f"samples (first {len(head)} shown):\n{details}"
+        )
+
+    dut._log.info(f"All {n_samples} samples match with random `en` gating.")
 
 
 # ── Runner entry point (runs outside the simulator) ─────────────────────────

@@ -1,6 +1,6 @@
 `default_nettype none
 
-module vocoder(clk, rst_n, mic, saw, out);
+module vocoder(clk, rst_n, en, mic, saw, out);
 // Three-band channel vocoder, matching vocoder_fixed_point.py exactly.
 //
 //   mic -> 3 bandpass filters -> |.| -> envelope LPF -.
@@ -13,6 +13,7 @@ module vocoder(clk, rst_n, mic, saw, out);
 
     input  wire               clk;
     input  wire               rst_n;
+    input  wire               en;        // 1-cycle pulse advances all filters by one sample
     input  wire signed [15:0] mic;
     input  wire signed [15:0] saw;
     output wire signed [15:0] out;
@@ -52,11 +53,11 @@ module vocoder(clk, rst_n, mic, saw, out);
 
     // <module name> <instantiation name>(.<portname>(passval), );
     filter #(.b0(B1_b0), .b1(B1_b1), .b2(B1_b2), .a1(B1_a1), .a2(B1_a2))
-        bf1(.clk(clk), .rst_n(rst_n), .in(mic), .out(bf1_out));
+        bf1(.clk(clk), .rst_n(rst_n), .en(en), .in(mic), .out(bf1_out));
     filter #(.b0(B2_b0), .b1(B2_b1), .b2(B2_b2), .a1(B2_a1), .a2(B2_a2))
-        bf2(.clk(clk), .rst_n(rst_n), .in(mic), .out(bf2_out));
+        bf2(.clk(clk), .rst_n(rst_n), .en(en), .in(mic), .out(bf2_out));
     filter #(.b0(B3_b0), .b1(B3_b1), .b2(B3_b2), .a1(B3_a1), .a2(B3_a2))
-        bf3(.clk(clk), .rst_n(rst_n), .in(mic), .out(bf3_out));
+        bf3(.clk(clk), .rst_n(rst_n), .en(en), .in(mic), .out(bf3_out));
 
     // Rectify by flipping bits and adding 1 (absolute value)
     wire signed [15:0] rect1 = bf1_out[15] ? -bf1_out : bf1_out;
@@ -69,11 +70,11 @@ module vocoder(clk, rst_n, mic, saw, out);
     wire signed [15:0] e3_out;
 
     filter #(.b0(ENV_b0), .b1(16'sd0), .b2(16'sd0), .a1(ENV_a1), .a2(16'sd0))
-        e1(.clk(clk), .rst_n(rst_n), .in(rect1), .out(e1_out));
+        e1(.clk(clk), .rst_n(rst_n), .en(en), .in(rect1), .out(e1_out));
     filter #(.b0(ENV_b0), .b1(16'sd0), .b2(16'sd0), .a1(ENV_a1), .a2(16'sd0))
-        e2(.clk(clk), .rst_n(rst_n), .in(rect2), .out(e2_out));
+        e2(.clk(clk), .rst_n(rst_n), .en(en), .in(rect2), .out(e2_out));
     filter #(.b0(ENV_b0), .b1(16'sd0), .b2(16'sd0), .a1(ENV_a1), .a2(16'sd0))
-        e3(.clk(clk), .rst_n(rst_n), .in(rect3), .out(e3_out));
+        e3(.clk(clk), .rst_n(rst_n), .en(en), .in(rect3), .out(e3_out));
 
     // Same bandpass filters on the external sawtooth carrier
     wire signed [15:0] sbf1_out;
@@ -81,11 +82,11 @@ module vocoder(clk, rst_n, mic, saw, out);
     wire signed [15:0] sbf3_out;
 
     filter #(.b0(B1_b0), .b1(B1_b1), .b2(B1_b2), .a1(B1_a1), .a2(B1_a2))
-        sbf1(.clk(clk), .rst_n(rst_n), .in(saw), .out(sbf1_out));
+        sbf1(.clk(clk), .rst_n(rst_n), .en(en), .in(saw), .out(sbf1_out));
     filter #(.b0(B2_b0), .b1(B2_b1), .b2(B2_b2), .a1(B2_a1), .a2(B2_a2))
-        sbf2(.clk(clk), .rst_n(rst_n), .in(saw), .out(sbf2_out));
+        sbf2(.clk(clk), .rst_n(rst_n), .en(en), .in(saw), .out(sbf2_out));
     filter #(.b0(B3_b0), .b1(B3_b1), .b2(B3_b2), .a1(B3_a1), .a2(B3_a2))
-        sbf3(.clk(clk), .rst_n(rst_n), .in(saw), .out(sbf3_out));
+        sbf3(.clk(clk), .rst_n(rst_n), .en(en), .in(saw), .out(sbf3_out));
 
     // Multipliers: env_i * filtered_saw_i, truncated Q2.30 -> Q1.15
     wire signed [15:0] mult1_out;
