@@ -36,7 +36,7 @@ VOICE_BANDS = [
     (2000, 6000),
 ]
 
-FILTER_ORDER = 2    # Butterworth order per band → 2×N poles total
+FILTER_ORDER = 1    # Butterworth order; bandpass transform doubles it → 1 SOS section
 
 # Envelope LP smoother: ~20 Hz cutoff, one-pole IIR
 ENV_FC    = 20.0
