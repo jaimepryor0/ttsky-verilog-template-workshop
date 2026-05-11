@@ -9,40 +9,35 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Install iverilog
-        shell: bash
-        run: sudo apt-get update && sudo apt-get install -y iverilog
+      - name: Install verilator
+        run: sudo apt-get update && sudo apt-get install -y verilator
 
-      # Set Python up and install cocotb
       - name: Setup python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.13'
 
       - name: Install Python packages
-        shell: bash
         run: pip install -r test/requirements.txt
 
-      - name: Run tests
+      - name: Verilator lint (top: tt_um_JAIMEPRYOR0_VGA_YAY)
         run: |
-          cd test
-          make clean
-          make
-          # make will return success even if the test fails, so check for failure in the results.xml
-          ! grep failure results.xml
+          verilator --lint-only -Wall \
+            --top-module tt_um_JAIMEPRYOR0_VGA_YAY \
+            src/project.v src/spi_master.v src/vocoder.v src/filter.v src/pitch.v
 
-      - name: Test Summary
-        uses: test-summary/action@v2.3
-        with:
-          paths: "test/results.xml"
-        if: always()
+      - name: Vocoder DSP test (test_vocoder.py)
+        run: python test/test_vocoder.py
 
-      - name: upload waveform and test results
-        if: success() || failure()
+      - name: SPI master test (test_spi.py)
+        run: python test/test_spi.py
+
+      - name: Full chip integration test (test_chip.py, 5 pitches)
+        run: python test/test_chip.py
+
+      - name: Upload sim build artefacts
+        if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: test-results
-          path: |
-            test/tb.fst
-            test/results.xml
-            test/output/*
+          name: sim-build
+          path: test/sim_build
