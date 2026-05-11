@@ -18,9 +18,10 @@
  *                 rises to 1 when the new sample is registered; stays high
  *                 between samples. Async consumers can poll or edge-trigger.)
  *   uio_in[7:6]   carrier waveform select (0=saw, 1=inv saw, 2=square, 3=tri)
- *   uio_in[5:0]   pitch byte (6-bit; mapped to the top 6 bits of an 8-bit NCO
- *                 increment so the frequency range matches the 8-bit version,
- *                 just with 4x coarser steps)
+ *   uio_in[5:0]   pitch byte (6-bit; mapped to the LOW 6 bits of an 8-bit NCO
+ *                 increment, giving f = pitch * Fs / 256 -- about 187 Hz per
+ *                 step at Fs=48k. Range 187 Hz .. 11.8 kHz, covers voice
+ *                 fundamentals comfortably.)
  *   uio_out / uio_oe   driven low (uio used as input only)
  *
  * SPDX-License-Identifier: Apache-2.0
@@ -74,28 +75,30 @@ module tt_um_JAIMEPRYOR0_VGA_YAY(
     /* verilator lint_on UNUSEDSIGNAL */
     wire              vocoder_done;
 
-    // Pitch byte is the bottom 6 bits of uio_in, scaled into the top 6 bits
-    // of an 8-bit increment so we keep the full frequency range (the bottom
-    // two phase-increment bits would have been < 1 bin per sample anyway).
+    // Pitch byte is the bottom 6 bits of uio_in, zero-padded into the low
+    // 6 bits of an 8-bit increment. That puts the smallest step at the
+    // bottom of the frequency range (Fs/256 ~ 187 Hz at 48 kHz) where it
+    // matters for voice carriers. Max output ~Fs * 63/256 ~ 11.8 kHz.
     pitch u_pitch (
         .clk      (clk),
         .rst_n    (rst_n),
         .en       (start_pulse),
-        .increment({uio_in[5:0], 2'b00}),
+        .increment({2'b00, uio_in[5:0]}),
         .mode     (uio_in[7:6]),
         .out      (saw_q7)
     );
 
-    // Coefficients (Q2.6) generated from vocoder_fixed_point.VOICE_BANDS at FS=48k.
-    // Two-band design (B1: 200-1000 Hz, B2: 500-2000 Hz). b1 is not a
-    // parameter -- vocoder.v skips that multiply phase entirely because
+    // Coefficients (Q2.6) generated from vocoder_fixed_point.VOICE_BANDS at FS=24k.
+    // Formant-band design (B1: 800-2500 Hz F2, B2: 2500-5000 Hz F3). b1 is
+    // not a parameter -- vocoder.v skips that multiply phase entirely because
     // every band's b1 quantises to zero at this filter design.
+    // ENV: 300 Hz cutoff at FS=24k -> (1-alpha)=5/64, alpha=59/64.
     vocoder #(
-        .B1_b0( 8'sd3  ), .B1_b2(-8'sd3 ),
-        .B1_a1(-8'sd121), .B1_a2( 8'sd58),
-        .B2_b0( 8'sd6  ), .B2_b2(-8'sd6 ),
-        .B2_a1(-8'sd116), .B2_a2( 8'sd53),
-        .ENV_b0(8'sd1),   .ENV_a1(-8'sd63)
+        .B1_b0( 8'sd12 ), .B1_b2(-8'sd12),
+        .B1_a1(-8'sd97 ), .B1_a2( 8'sd40),
+        .B2_b0( 8'sd16 ), .B2_b2(-8'sd16),
+        .B2_a1(-8'sd56 ), .B2_a2( 8'sd32),
+        .ENV_b0(8'sd5),   .ENV_a1(-8'sd59)
     ) u_vocoder (
         .clk  (clk),
         .rst_n(rst_n),

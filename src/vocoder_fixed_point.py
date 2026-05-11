@@ -3,11 +3,11 @@ vocoder_fixed_point.py — Fixed-point vocoder using hw_int and filter_df2_hw.
 
 Pipeline:
   1. Load audio: hw_int (ADC_BITS wide, Q1.DATA_FRAC)
-  2. Apply IIR bandpass filters to audio signal
+  2. Apply 2 IIR bandpass filters (formant bands) to audio signal
   3. Envelope-detect each audio band: abs() + first-order IIR LP smoother
-  4. Generate 500 Hz sawtooth: hw_int, apply same 3 bandpass filters
+  4. Generate sawtooth: hw_int, apply same 2 bandpass filters
   5. Multiply each sawtooth band by its corresponding audio envelope
-  6. Accumulate 3 products = output
+  6. Saturating-accumulate the per-band products = output
 """
 
 import numpy as np
@@ -19,30 +19,45 @@ from hw_int import hw_int
 from filter_df2 import filter_df2_hw
 
 # ── Configuration ─────────────────────────────────────────────────────────────
-FS        = 48_000
+# Formant-band design (from vocoder_fixed_point_formant.py). The float SOS
+# coefficients were produced at FS=24k and are then quantised down to our
+# 8-bit Q2.6 coefficient format (the friend's reference uses Q2.14; we eat
+# the extra quantisation error to keep the multiplier 8x8).
+FS        = 24_000
 ADC_BITS  = 8
-DATA_FRAC = 7       # Q1.7: audio in (-1, 1), 12-bit ADC truncated to top 8 bits
+DATA_FRAC = 7       # Q1.7 audio: signed (-1, 1), full 8-bit signed precision
 COEF_BITS = 8
-COEF_FRAC = 6       # Q2.6: keeps SOS biquot a[] within (-2, 2); coarse but stable
-SAW_FREQ  = 500     # Hz
+COEF_FRAC = 6       # Q2.6 coefficients (range -2..+2, resolution 1/64)
+SAW_FREQ  = 250     # Hz -- matches the formant-design notebook's carrier_hz
 
-# Voice bands: log-spaced to match vocal tract resonance structure
-#   Band 1: fundamentals and lower formants    80 – 500 Hz
-#   Band 2: core vowel formant region        500 – 2000 Hz
-#   Band 3: fricatives, sibilance, upper F3 2000 – 6000 Hz
+# Speech formant bands:
+#   Band 1: F2 vowel colour            800 – 2500 Hz
+#   Band 2: F3 consonant character    2500 – 5000 Hz
 VOICE_BANDS = [
-    (200,   1000),  # fundamentals + lower formants
-    (500,  2000),   # core vowel formant region
+    (800,  2500),
+    (2500, 5000),
 ]
 
 FILTER_ORDER = 1    # Butterworth order; bandpass transform doubles it → 1 SOS section
 
-# Envelope LP smoother: ~100 Hz cutoff. At Q2.6 the original 20 Hz cutoff
-# would quantise b0 = (1 - alpha) to literal 0 -- filter dies. 100 Hz gives
-# b0=1, a1=-63 at Q2.6 (effective cutoff ~120 Hz). Faster envelope tracking
-# than before, but still well below voice band-limit.
-ENV_FC    = 100.0
-ENV_ALPHA = float(np.exp(-2.0 * np.pi * ENV_FC / FS))
+# Envelope LP smoother: bumped to 300 Hz so (1-alpha) survives Q2.6
+# quantisation. The weakest band peak is ~0.12, so we need
+# (1-alpha) * 0.12 ≥ 1 LSB (1/128 of Q1.7) → 1-alpha ≥ 0.065
+# → fc ≳ 270 Hz. At fc=300 Hz the quantised cutoff is ~310 Hz.
+ENV_FC    = 300.0
+ENV_ALPHA = float(np.exp(-2.0 * np.pi * ENV_FC / FS))   # ≈ 0.9245
+
+
+# ── Hardcoded SOS coefficients ────────────────────────────────────────────────
+# Per-band [b0, b1, b2, a0, a1, a2] precomputed at FS=24000.
+# (b1 is always 0 for these bandpass biquots, which the RTL relies on -- the
+# vocoder.v phase 1 multiply is omitted entirely.)
+_SOS_COEFFS = {
+    (800,  2500): np.array([[ 0.1845234943,  0.0, -0.1845234943,
+                               1.0,         -1.5185835916,  0.6309530114]]),
+    (2500, 5000): np.array([[ 0.2534272870,  0.0, -0.2534272870,
+                               1.0,         -0.8760383965,  0.4931454260]]),
+}
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -52,11 +67,8 @@ def _wrap_coeffs(c: np.ndarray) -> hw_int:
 
 
 def _design_bandpass(flo: float, fhi: float) -> list[tuple[hw_int, hw_int]]:
-    """
-    Butterworth bandpass → list of quantised biquad (b, a) pairs (SOS cascade).
-    SOS keeps each section's a[] within (-2, 2), avoiding direct-form sensitivity.
-    """
-    sos = sig.butter(FILTER_ORDER, [flo, fhi], btype='bandpass', output='sos', fs=FS)
+    """Return quantised biquot (b, a) pairs from the hardcoded SOS table."""
+    sos = _SOS_COEFFS[(flo, fhi)]
     return [(_wrap_coeffs(row[:3]), _wrap_coeffs(row[3:])) for row in sos]
 
 
