@@ -32,13 +32,21 @@ from hw_int import hw_int  # noqa: E402
 
 
 CLK_PERIOD_NS = 40                                  # 25 MHz chip clock
-WINDOW_MS     = 20                                  # 20 ms ≈ 960 samples
 AUDIO_PATH    = os.path.join(_SRC, 'hello.wav')
-# uio_byte = {mode[1:0], pitch[5:0]}. Spread the test across all four
+
+# Detect the gate-level smoke-test mode set by test/Makefile's GATES=yes
+# branch. GL sim under icarus is ~30x slower than verilator RTL, so we
+# trim the audio window and the configuration sweep way down.
+_GL_TEST   = os.environ.get('GL_TEST', '') == '1'
+WINDOW_MS  = 2   if _GL_TEST else 20                # ~96 samples vs ~960
+# uio_byte = {mode[1:0], pitch[5:0]}. Spread the RTL test across all four
 # carrier modes (0=saw, 1=saw-down, 2=square, 3=triangle) and a few
-# pitches to exercise both axes of the new pin layout.
-UIO_BYTES     = [0x01, 0x02, 0x04, 0x08, 0x10,      # mode 0 (saw up)
-                 0x42, 0x84, 0xC4]                  # modes 1..3 at pitch=2,4,4
+# pitches to exercise both axes of the new pin layout. GL only runs one
+# saw config -- enough to prove the netlist isn't broken.
+UIO_BYTES  = [0x04] if _GL_TEST else [
+    0x01, 0x02, 0x04, 0x08, 0x10,                   # mode 0 (saw up)
+    0x42, 0x84, 0xC4,                               # modes 1..3 at pitch=2,4,4
+]
 
 
 # ─── Bit-exact helpers ─────────────────────────────────────────────────────
@@ -48,12 +56,12 @@ def chip_carrier(n_samples: int, uio_byte: int) -> hw_int:
 
     uio_byte layout matches the chip:
       bits [7:6] = waveform mode  (0=saw up, 1=saw down, 2=square, 3=triangle)
-      bits [5:0] = 6-bit pitch byte; project.v promotes it to the top 6 bits
-                   of an 8-bit phase increment (multiply by 4).
+      bits [5:0] = 6-bit pitch byte; project.v zero-extends it to an 8-bit
+                   phase increment, giving f = pitch * Fs / 256.
     """
     mode   = (uio_byte >> 6) & 0x3
     pitch6 = uio_byte & 0x3F
-    inc    = (pitch6 << 2) & 0xFF
+    inc    = pitch6 & 0xFF
     phase  = 0x80
     out    = np.zeros(n_samples, dtype=np.int64)
     for n in range(n_samples):

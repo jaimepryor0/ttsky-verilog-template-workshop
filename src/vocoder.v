@@ -220,6 +220,12 @@ module vocoder(clk, rst_n, start, done, mic, saw, out);
             out       <= 8'sd0;
             m_acc     <= 8'sd0;
             m_b       <= 8'd0;
+            // NOTE: s1/s2/slot/xb2_r/y_r/mic_r/saw_r intentionally have NO
+            // reset (DFXTP, not DFRTP). The first ~50 audio samples after
+            // power-up are transient noise as the IIR filters wash the
+            // power-on state out -- inaudible on an audio path. The
+            // cocotb regression skips that window when comparing against
+            // the Python reference (see WARMUP in test_chip / test_vocoder).
         end else begin
             // done has level semantics: it holds its value unless a new
             // start arrives (clear) or a sample finishes (set).

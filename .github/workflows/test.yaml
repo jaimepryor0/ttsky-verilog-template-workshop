@@ -50,15 +50,12 @@ jobs:
         run: |
           verilator --lint-only -Wall \
             --top-module tt_um_JAIMEPRYOR0_VGA_YAY \
-            src/project.v src/spi_master.v src/vocoder.v src/filter.v src/pitch.v
+            src/project.v src/vocoder.v src/pitch.v
 
       - name: Vocoder DSP test (test_vocoder.py)
         run: python test/test_vocoder.py
 
-      - name: SPI master test (test_spi.py)
-        run: python test/test_spi.py
-
-      - name: Full chip integration test (test_chip.py, 5 pitches)
+      - name: Full chip integration test (test_chip.py, all waveform modes)
         run: python test/test_chip.py
 
       - name: Upload sim build artefacts
