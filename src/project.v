@@ -77,8 +77,6 @@ module tt_um_JAIMEPRYOR0_VGA_YAY(
     );
 
     // ─── Sawtooth NCO + vocoder (clock-enabled at audio sample rate) ────────
-    reg  signed [7:0]  mic_q7;              // latched ADC reading in Q1.7
-    reg  signed [7:0]  dac_q7;              // captured vocoder out for DAC
     reg                sample_en;           // 1-cycle start pulse per sample
     wire signed [7:0]  saw_q7;
     wire signed [7:0]  vocoder_out;
@@ -88,7 +86,7 @@ module tt_um_JAIMEPRYOR0_VGA_YAY(
         .clk      (clk),
         .rst_n    (rst_n),
         .en       (sample_en),
-        .increment({ui_in, 24'b0}),         // ui_in maps to top 8 bits of 32
+        .increment(ui_in),
         .out      (saw_q7)
     );
 
@@ -96,11 +94,11 @@ module tt_um_JAIMEPRYOR0_VGA_YAY(
     // ENV_b0=1 (= 1/64) because (1-alpha) at the chosen 100 Hz cutoff lands
     // just inside Q2.6 resolution -- 20 Hz would quantise to 0.
     vocoder #(
-        .B1_b0( 8'sd3  ), .B1_b1( 8'sd0 ), .B1_b2(-8'sd3  ),
+        .B1_b0( 8'sd3  ), .B1_b2(-8'sd3 ),
         .B1_a1(-8'sd121), .B1_a2( 8'sd58),
-        .B2_b0( 8'sd6  ), .B2_b1( 8'sd0 ), .B2_b2(-8'sd6  ),
+        .B2_b0( 8'sd6  ), .B2_b2(-8'sd6 ),
         .B2_a1(-8'sd116), .B2_a2( 8'sd53),
-        .B3_b0( 8'sd14 ), .B3_b1( 8'sd0 ), .B3_b2(-8'sd14 ),
+        .B3_b0( 8'sd14 ), .B3_b2(-8'sd14),
         .B3_a1(-8'sd91 ), .B3_a2( 8'sd37),
         .ENV_b0(8'sd1),   .ENV_a1(-8'sd63)
     ) u_vocoder (
@@ -108,7 +106,7 @@ module tt_um_JAIMEPRYOR0_VGA_YAY(
         .rst_n(rst_n),
         .start(sample_en),
         .done (vocoder_done),
-        .mic  (mic_q7),
+        .mic  (adc_q7),
         .saw  (saw_q7),
         .out  (vocoder_out)
     );
@@ -125,15 +123,17 @@ module tt_um_JAIMEPRYOR0_VGA_YAY(
     // MCP4921 write word: {A/B, BUF, ~GA, ~SHDN, D11..D0}. Channel A,
     // unbuffered, 1× gain, active = 4'b0011. Convert 8-bit Q1.7 to 12-bit
     // unsigned offset binary by toggling the sign bit and zero-padding the
-    // bottom 4 LSBs.
-    wire [11:0] dac_data    = {~dac_q7[7], dac_q7[6:0], 4'b0000};
+    // bottom 4 LSBs. `vocoder_out` is a registered output of the vocoder
+    // module and stays valid from `done` until the next sample.
+    wire [11:0] dac_data    = {~vocoder_out[7], vocoder_out[6:0], 4'b0000};
     wire [15:0] dac_tx_word = {4'b0011, dac_data};
 
     // ─── Controller FSM ─────────────────────────────────────────────────────
     //   IDLE → ADC_WAIT → STEP → VOC_WAIT → DAC_REQ → DAC_WAIT → IDLE
     // STEP pulses sample_en for one cycle, kicking off the serial vocoder
     // (and advancing the pitch NCO). VOC_WAIT blocks until vocoder_done
-    // pulses, at which point dac_q15 latches the freshly-computed sample.
+    // pulses; vocoder_out is then valid until the next sample, so the DAC
+    // SPI write can read it directly without a holding register.
     localparam S_IDLE     = 3'd0;
     localparam S_ADC_WAIT = 3'd1;
     localparam S_STEP     = 3'd2;
@@ -142,17 +142,13 @@ module tt_um_JAIMEPRYOR0_VGA_YAY(
     localparam S_DAC_WAIT = 3'd5;
 
     reg [2:0] state;
-    reg       target_dac;                  // routes shared CS to the right slave
 
     always @(posedge clk) begin
         if (~rst_n) begin
             state      <= S_IDLE;
             spi_start  <= 1'b0;
             spi_tx     <= 16'h0000;
-            mic_q7     <= 8'sd0;
-            dac_q7     <= 8'sd0;
             sample_en  <= 1'b0;
-            target_dac <= 1'b0;
         end else begin
             spi_start <= 1'b0;             // default — pulse only when needed
             sample_en <= 1'b0;
@@ -161,15 +157,12 @@ module tt_um_JAIMEPRYOR0_VGA_YAY(
                 S_IDLE: begin
                     spi_tx     <= 16'h0000;
                     spi_start  <= 1'b1;    // kick off ADC read
-                    target_dac <= 1'b0;
                     state      <= S_ADC_WAIT;
                 end
 
                 S_ADC_WAIT: begin
-                    if (spi_done) begin
-                        mic_q7 <= adc_q7;
-                        state  <= S_STEP;
-                    end
+                    if (spi_done)
+                        state <= S_STEP;
                 end
 
                 S_STEP: begin
@@ -178,16 +171,13 @@ module tt_um_JAIMEPRYOR0_VGA_YAY(
                 end
 
                 S_VOC_WAIT: begin
-                    if (vocoder_done) begin
-                        dac_q7 <= vocoder_out;
-                        state  <= S_DAC_REQ;
-                    end
+                    if (vocoder_done)
+                        state <= S_DAC_REQ;
                 end
 
                 S_DAC_REQ: begin
                     spi_tx     <= dac_tx_word;
                     spi_start  <= 1'b1;
-                    target_dac <= 1'b1;
                     state      <= S_DAC_WAIT;
                 end
 
@@ -202,6 +192,9 @@ module tt_um_JAIMEPRYOR0_VGA_YAY(
     end
 
     // Mux the shared CS to the active slave (the other one is held high).
+    // target_dac is high during DAC SPI states only; derived from `state`
+    // instead of a dedicated register.
+    wire target_dac = (state == S_DAC_REQ) || (state == S_DAC_WAIT);
     assign adc_cs_n = target_dac ? 1'b1     : spi_cs_n;
     assign dac_cs_n = target_dac ? spi_cs_n : 1'b1;
 

@@ -48,17 +48,17 @@ PITCHES       = [1, 2, 4, 8, 16]                    # ui_in values to sweep
 def chip_sawtooth(n_samples: int, pitch_byte: int) -> hw_int:
     """Replica of pitch.v's NCO. Pure integer math — matches the HW sample-for-sample.
 
-    increment = pitch_byte << 24 (project.v ties ui_in into the top 8 bits of
-    the 32-bit phase increment). Phase resets to 0x80000000 so sample 0 = -1.0.
-    Output is the top 8 bits of the phase accumulator reinterpreted as Q1.7.
+    pitch.v now collapses the NCO to an 8-bit accumulator: `phase` resets to
+    0x80 (-1.0 reinterpreted as Q1.7) and increments by `pitch_byte` per
+    sample. This is bit-exact with the previous 32-bit version because the
+    chip only ever drove the top 8 bits of the increment.
     """
-    increment = (pitch_byte & 0xFF) << 24
-    phase     = 0x80000000
-    out       = np.zeros(n_samples, dtype=np.int64)
+    inc   = pitch_byte & 0xFF
+    phase = 0x80
+    out   = np.zeros(n_samples, dtype=np.int64)
     for n in range(n_samples):
-        top8    = (phase >> 24) & 0xFF
-        out[n]  = top8 - 0x100 if (top8 & 0x80) else top8
-        phase   = (phase + increment) & 0xFFFFFFFF
+        out[n] = phase - 0x100 if (phase & 0x80) else phase
+        phase  = (phase + inc) & 0xFF
     return hw_int(out, bits=vfp.ADC_BITS, frac_bits=vfp.DATA_FRAC)
 
 
@@ -272,7 +272,6 @@ def main():
     runner = get_runner(sim)
     runner.build(
         sources=[
-            os.path.join(_SRC,  'filter.v'),
             os.path.join(_SRC,  'pitch.v'),
             os.path.join(_SRC,  'vocoder.v'),
             os.path.join(_SRC,  'spi_master.v'),

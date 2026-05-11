@@ -12,10 +12,17 @@ module vocoder(clk, rst_n, start, done, mic, saw, out);
 // 8-bit signed throughout: Q1.7 data, Q2.6 coefficients.
 //
 // Shared serial multiplier: one signed shift-and-add unit handles every
-// multiplication in the vocoder (the 5 MACs per biquad x 9 biquads, plus
-// the 3 env*saw post-multiplies). Each multiply takes 1 setup cycle + 8
-// iteration cycles = 9 chip clocks. Total per audio sample:
-//   (6 BF/ENV * 5 phases + 3 SBF * 6 phases) * 9 + 1 = 433 cycles.
+// multiplication in the vocoder (the 4 MACs per biquad x 9 biquads, plus
+// the 3 env*saw post-multiplies). The b1 phase is omitted because every
+// b1 coefficient in this design's Butterworth bandpass / single-pole
+// envelope chain is exactly zero -- the saving is one whole multiply
+// cycle (9 chip clocks) per biquad. If anyone changes VOICE_BANDS to a
+// design with a non-zero b1, the bit-exact Python comparison in
+// test_vocoder.py will catch it.
+//
+// Each multiply takes 1 setup cycle + 8 iteration cycles = 9 chip clocks.
+// Total per audio sample:
+//   (6 BF/ENV * 4 phases + 3 SBF * 5 phases) * 9 + 1 = 352 cycles.
 //
 // Interface:
 //   start - 1-cycle pulse to begin processing one sample using the current
@@ -31,21 +38,19 @@ module vocoder(clk, rst_n, start, done, mic, saw, out);
     input  wire signed [7:0] saw;
     output reg  signed [7:0] out;
 
-    // FILTER COEFFICIENTS (Q2.6 signed) //
+    // FILTER COEFFICIENTS (Q2.6 signed). b1 is not a parameter because
+    // the b1 multiply phase is omitted; see the file header for details.
     parameter signed [7:0] B1_b0 = 8'sd0; // band 1
-    parameter signed [7:0] B1_b1 = 8'sd0;
     parameter signed [7:0] B1_b2 = 8'sd0;
     parameter signed [7:0] B1_a1 = 8'sd0;
     parameter signed [7:0] B1_a2 = 8'sd0;
 
     parameter signed [7:0] B2_b0 = 8'sd0; // band 2
-    parameter signed [7:0] B2_b1 = 8'sd0;
     parameter signed [7:0] B2_b2 = 8'sd0;
     parameter signed [7:0] B2_a1 = 8'sd0;
     parameter signed [7:0] B2_a2 = 8'sd0;
 
     parameter signed [7:0] B3_b0 = 8'sd0; // band 3
-    parameter signed [7:0] B3_b1 = 8'sd0;
     parameter signed [7:0] B3_b2 = 8'sd0;
     parameter signed [7:0] B3_a1 = 8'sd0;
     parameter signed [7:0] B3_a2 = 8'sd0;
@@ -74,15 +79,20 @@ module vocoder(clk, rst_n, start, done, mic, saw, out);
     reg signed [7:0] sbf_y;
 
     // --- Per-filter MAC intermediates ---
-    reg signed [7:0] xb0_r, xb1_r, xb2_r, ya1_r;
+    // Phase 0's product is folded into `y_r` directly (no xb0_r). Phase 1
+    // captures the b2 product into xb2_r; phase 2 captures the a1 product
+    // into ya1_r.
+    reg signed [7:0] xb2_r, ya1_r;
     reg signed [7:0] y_r;
 
-    // --- Output accumulator (2 bits of growth for 3-way sum) ---
-    reg signed [9:0] acc;
+    // --- Output accumulator ---
+    // 8-bit modular addition produces the same low 8 bits as the wider
+    // accumulator we used to keep; out truncates to acc[7:0] anyway.
+    reg signed [7:0] acc;
 
     // --- Control ---
     reg [3:0] filt_idx;   // 0..8
-    reg [2:0] mac_phase;  // 0..6 (0..4 = MAC, 5 = post-mul, 6 = output)
+    reg [2:0] mac_phase;  // 0..5 (0..3 = MAC, 4 = post-mul, 5 = output)
     reg [3:0] sub_cnt;    // 0..8: 0 = operand setup, 1..8 = serial-mult iterations
     reg       busy;
 
@@ -100,14 +110,14 @@ module vocoder(clk, rst_n, start, done, mic, saw, out);
     wire signed [7:0] rect2 = bf_y[2][7] ? -bf_y[2] : bf_y[2];
 
     // --- Coefficient ROM (combinational mux on filt_idx) ---
-    reg signed [7:0] b0_sel, b1_sel, b2_sel, a1_sel, a2_sel;
+    reg signed [7:0] b0_sel, b2_sel, a1_sel, a2_sel;
     always @* begin
         case (filt_idx)
-            4'd0, 4'd6: begin b0_sel=B1_b0; b1_sel=B1_b1; b2_sel=B1_b2; a1_sel=B1_a1; a2_sel=B1_a2; end
-            4'd1, 4'd7: begin b0_sel=B2_b0; b1_sel=B2_b1; b2_sel=B2_b2; a1_sel=B2_a1; a2_sel=B2_a2; end
-            4'd2, 4'd8: begin b0_sel=B3_b0; b1_sel=B3_b1; b2_sel=B3_b2; a1_sel=B3_a1; a2_sel=B3_a2; end
-            4'd3, 4'd4, 4'd5: begin b0_sel=ENV_b0; b1_sel=8'sd0; b2_sel=8'sd0; a1_sel=ENV_a1; a2_sel=8'sd0; end
-            default: begin b0_sel=8'sd0; b1_sel=8'sd0; b2_sel=8'sd0; a1_sel=8'sd0; a2_sel=8'sd0; end
+            4'd0, 4'd6: begin b0_sel=B1_b0; b2_sel=B1_b2; a1_sel=B1_a1; a2_sel=B1_a2; end
+            4'd1, 4'd7: begin b0_sel=B2_b0; b2_sel=B2_b2; a1_sel=B2_a1; a2_sel=B2_a2; end
+            4'd2, 4'd8: begin b0_sel=B3_b0; b2_sel=B3_b2; a1_sel=B3_a1; a2_sel=B3_a2; end
+            4'd3, 4'd4, 4'd5: begin b0_sel=ENV_b0; b2_sel=8'sd0; a1_sel=ENV_a1; a2_sel=8'sd0; end
+            default: begin b0_sel=8'sd0; b2_sel=8'sd0; a1_sel=8'sd0; a2_sel=8'sd0; end
         endcase
     end
 
@@ -125,18 +135,19 @@ module vocoder(clk, rst_n, start, done, mic, saw, out);
     end
 
     // --- Operand selection per phase ---
-    //   phase 0..2: in_sel * b0/b1/b2  (Q1.7 * Q2.6)
-    //   phase 3..4: y_r    * a1/a2     (Q1.7 * Q2.6)
-    //   phase 5  :  env_y[i-6] * sbf_y (Q1.7 * Q1.7)
+    //   phase 0  : in_sel * b0        (Q1.7 * Q2.6) -- also folds in `+ s1`
+    //   phase 1  : in_sel * b2        (Q1.7 * Q2.6)
+    //   phase 2  : y_r    * a1        (Q1.7 * Q2.6)
+    //   phase 3  : y_r    * a2        (Q1.7 * Q2.6) -- ends biquad
+    //   phase 4  : env_y[i-6] * sbf_y (Q1.7 * Q1.7) -- SBF post-mul only
     reg signed [7:0] op_a, op_b;
     always @* begin
         case (mac_phase)
             3'd0: begin op_a = in_sel; op_b = b0_sel; end
-            3'd1: begin op_a = in_sel; op_b = b1_sel; end
-            3'd2: begin op_a = in_sel; op_b = b2_sel; end
-            3'd3: begin op_a = y_r;    op_b = a1_sel; end
-            3'd4: begin op_a = y_r;    op_b = a2_sel; end
-            3'd5: begin
+            3'd1: begin op_a = in_sel; op_b = b2_sel; end
+            3'd2: begin op_a = y_r;    op_b = a1_sel; end
+            3'd3: begin op_a = y_r;    op_b = a2_sel; end
+            3'd4: begin
                 case (filt_idx)
                     4'd6:    begin op_a = env_y[0]; op_b = sbf_y; end
                     4'd7:    begin op_a = env_y[1]; op_b = sbf_y; end
@@ -176,30 +187,17 @@ module vocoder(clk, rst_n, start, done, mic, saw, out);
     wire signed [7:0] prod_trunc_filt   = mul_prod[13:6];
     wire signed [7:0] prod_trunc_envsaw = mul_prod[14:7];
 
-    // Sign-extend the post-multiply product to the 10-bit accumulator width
-    wire signed [9:0] sxprod = {{2{prod_trunc_envsaw[7]}}, prod_trunc_envsaw};
-
     // --- FSM ---
-    integer i;
+    //
+    // Reset wiring is deliberately limited to the control path (state, busy,
+    // counters, multiplier, and `out`). The filter-state arrays (s1/s2/bf_y/
+    // env_y/sbf_y) and per-MAC pipeline registers are *not* reset, which lets
+    // synthesis map them to plain DFFs (DFXTP) instead of the larger
+    // reset-flop cells (DFRTP). The first sample or two after power-up will
+    // use whatever values the flops booted into, but the IIR filters mix that
+    // garbage out within a handful of samples -- inaudible on an audio path.
     always @(posedge clk) begin
         if (~rst_n) begin
-            for (i = 0; i < 9; i = i + 1) begin
-                s1[i] <= 8'sd0;
-                s2[i] <= 8'sd0;
-            end
-            for (i = 0; i < 3; i = i + 1) begin
-                bf_y[i]  <= 8'sd0;
-                env_y[i] <= 8'sd0;
-            end
-            sbf_y     <= 8'sd0;
-            xb0_r     <= 8'sd0;
-            xb1_r     <= 8'sd0;
-            xb2_r     <= 8'sd0;
-            ya1_r     <= 8'sd0;
-            y_r       <= 8'sd0;
-            acc       <= 10'sd0;
-            mic_r     <= 8'sd0;
-            saw_r     <= 8'sd0;
             filt_idx  <= 4'd0;
             mac_phase <= 3'd0;
             sub_cnt   <= 4'd0;
@@ -219,19 +217,19 @@ module vocoder(clk, rst_n, start, done, mic, saw, out);
                     sub_cnt   <= 4'd0;
                     mic_r     <= mic;
                     saw_r     <= saw;
-                    acc       <= 10'sd0;
+                    acc       <= 8'sd0;
                 end
             end else begin
-                if (mac_phase == 3'd6) begin
+                if (mac_phase == 3'd5) begin
                     // Output phase: register out, pulse done, return to idle.
-                    out       <= acc[7:0];
+                    out       <= acc;
                     done      <= 1'b1;
                     busy      <= 1'b0;
                     filt_idx  <= 4'd0;
                     mac_phase <= 3'd0;
                     sub_cnt   <= 4'd0;
                 end else begin
-                    // MAC phase (0..4) or post-mul phase (5). Each spans
+                    // MAC phase (0..3) or post-mul phase (4). Each spans
                     // sub_cnt = 0 (setup) followed by sub_cnt = 1..8
                     // (8 multiplier iterations).
                     if (sub_cnt == 4'd0) begin
@@ -253,28 +251,33 @@ module vocoder(clk, rst_n, start, done, mic, saw, out);
                         sub_cnt <= 4'd0;
 
                         // Phase-specific bookkeeping and transition.
-                        if (mac_phase == 3'd5) begin
+                        if (mac_phase == 3'd4) begin
                             // Post-mul: accumulate env*sbf into output sum.
-                            acc <= acc + sxprod;
+                            // 8-bit modular addition; the wide output truncates
+                            // to acc[7:0] regardless of growth.
+                            acc <= acc + prod_trunc_envsaw;
                             if (filt_idx == 4'd8) begin
-                                mac_phase <= 3'd6;
+                                mac_phase <= 3'd5;
                             end else begin
                                 filt_idx  <= filt_idx + 4'd1;
                                 mac_phase <= 3'd0;
                             end
                         end else begin
-                            // MAC phase 0..4 -- capture product and update state.
+                            // MAC phase 0..3 -- capture product and update state.
                             case (mac_phase)
-                                3'd0: xb0_r <= prod_trunc_filt;
-                                3'd1: begin
-                                    xb1_r <= prod_trunc_filt;
-                                    y_r   <= xb0_r + s1[filt_idx];  // y[n] = b0*x + s1
-                                end
-                                3'd2: xb2_r <= prod_trunc_filt;
-                                3'd3: ya1_r <= prod_trunc_filt;
-                                3'd4: begin
-                                    // ya2 == prod_trunc_filt this cycle
-                                    s1[filt_idx] <= xb1_r - ya1_r + s2[filt_idx];
+                                // Phase 0 (b0*x): fold the trailing `+ s1` into
+                                // the same cycle so the b0 product never needs
+                                // its own holding register. (b1 phase is
+                                // omitted entirely -- b1 is zero in this
+                                // design.)
+                                3'd0: y_r   <= prod_trunc_filt + s1[filt_idx];
+                                3'd1: xb2_r <= prod_trunc_filt;
+                                3'd2: ya1_r <= prod_trunc_filt;
+                                3'd3: begin
+                                    // ya2 == prod_trunc_filt this cycle.
+                                    // s1 normally is xb1 - ya1 + s2, but
+                                    // xb1 = b1*x = 0 here.
+                                    s1[filt_idx] <= s2[filt_idx] - ya1_r;
                                     s2[filt_idx] <= xb2_r - prod_trunc_filt;
                                     case (filt_idx)
                                         4'd0:             bf_y[0]  <= y_r;
@@ -290,12 +293,12 @@ module vocoder(clk, rst_n, start, done, mic, saw, out);
                                 default: ;
                             endcase
 
-                            if (mac_phase < 3'd4) begin
+                            if (mac_phase < 3'd3) begin
                                 mac_phase <= mac_phase + 3'd1;
                             end else begin
-                                // mac_phase == 4: end of biquad
+                                // mac_phase == 3: end of biquad
                                 if (filt_idx >= 4'd6) begin
-                                    mac_phase <= 3'd5;  // SBF needs post-mul
+                                    mac_phase <= 3'd4;  // SBF needs post-mul
                                 end else begin
                                     filt_idx  <= filt_idx + 4'd1;
                                     mac_phase <= 3'd0;

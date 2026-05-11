@@ -19,7 +19,6 @@ project:
     - "project.v"
     - "spi_master.v"
     - "vocoder.v"
-    - "filter.v"
     - "pitch.v"
 
 # The pinout of your project. Leave unused pins blank. DO NOT delete or add any pins.

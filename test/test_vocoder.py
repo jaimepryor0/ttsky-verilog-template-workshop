@@ -34,7 +34,12 @@ from hw_int import hw_int  # noqa: E402
 # -- Coefficient design (shared by runner and Python reference) -------------
 
 def _design_parameters() -> dict[str, int]:
-    """Compute all 17 Q2.14 coefficient ints to pass as toplevel parameters."""
+    """Compute all 14 Q2.14 coefficient ints to pass as toplevel parameters.
+
+    The vocoder hardware skips the b1 multiply phase, so we assert here that
+    every band's b1 coefficient rounds to zero. If a future VOICE_BANDS edit
+    produces a non-zero b1, this raises rather than silently diverging from
+    the Python reference."""
     params: dict[str, int] = {}
     for band_idx, (flo, fhi) in enumerate(vfp.VOICE_BANDS, start=1):
         sections = vfp._design_bandpass(flo, fhi)
@@ -44,8 +49,13 @@ def _design_parameters() -> dict[str, int]:
                 "models a single biquad per band. Set FILTER_ORDER = 1."
             )
         b_hw, a_hw = sections[0]
+        if int(b_hw.val[1]) != 0:
+            raise RuntimeError(
+                f"Band {band_idx}: b1 = {int(b_hw.val[1])}, but vocoder.v omits "
+                "the b1 multiply phase. Restore phase 1 in vocoder.v or pick "
+                "band edges that quantise b1 to zero."
+            )
         params[f"B{band_idx}_b0"] = int(b_hw.val[0])
-        params[f"B{band_idx}_b1"] = int(b_hw.val[1])
         params[f"B{band_idx}_b2"] = int(b_hw.val[2])
         params[f"B{band_idx}_a1"] = int(a_hw.val[1])
         params[f"B{band_idx}_a2"] = int(a_hw.val[2])
