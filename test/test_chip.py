@@ -50,29 +50,32 @@ def chip_sawtooth(n_samples: int, pitch_byte: int) -> hw_int:
 
     increment = pitch_byte << 24 (project.v ties ui_in into the top 8 bits of
     the 32-bit phase increment). Phase resets to 0x80000000 so sample 0 = -1.0.
-    Output is the top 13 bits of the phase accumulator reinterpreted as Q1.12.
+    Output is the top 8 bits of the phase accumulator reinterpreted as Q1.7.
     """
     increment = (pitch_byte & 0xFF) << 24
     phase     = 0x80000000
     out       = np.zeros(n_samples, dtype=np.int64)
     for n in range(n_samples):
-        top13   = (phase >> 19) & 0x1FFF
-        out[n]  = top13 - 0x2000 if (top13 & 0x1000) else top13
+        top8    = (phase >> 24) & 0xFF
+        out[n]  = top8 - 0x100 if (top8 & 0x80) else top8
         phase   = (phase + increment) & 0xFFFFFFFF
     return hw_int(out, bits=vfp.ADC_BITS, frac_bits=vfp.DATA_FRAC)
 
 
-def q12_to_dac12(q12: np.ndarray) -> np.ndarray:
-    """project.v: dac_data = {~dac_q12[12], dac_q12[11:1]} — sign-flip MSB, drop LSB."""
-    q12 = q12.astype(np.int64) & 0x1FFF             # 13-bit two's complement
-    return ((q12 ^ 0x1000) >> 1).astype(np.int64)   # toggle sign bit, drop LSB
+def q7_to_dac12(q7: np.ndarray) -> np.ndarray:
+    """project.v: dac_data = {~dac_q7[7], dac_q7[6:0], 4'b0000}.
+
+    Pads 4 zero LSBs onto the 8-bit Q1.7 value and flips the sign bit.
+    """
+    q7 = q7.astype(np.int64) & 0xFF                  # 8-bit two's complement
+    return (((q7 ^ 0x80) << 4) & 0xFFF).astype(np.int64)
 
 
-def adc12_to_q12(d12: np.ndarray) -> np.ndarray:
-    """Chip's view of a 12-bit ADC code as Q1.12: flip MSB, shift left by 1."""
+def adc12_to_q7(d12: np.ndarray) -> np.ndarray:
+    """Chip's view of a 12-bit ADC code as Q1.7: flip MSB and drop bottom 4."""
     d12 = d12.astype(np.int64) & 0xFFF
-    biased_13 = ((d12 ^ 0x800) << 1) & 0x1FFF       # 13-bit, LSB held at 0
-    return np.where(biased_13 & 0x1000, biased_13 - 0x2000, biased_13)
+    biased_8 = ((d12 ^ 0x800) >> 4) & 0xFF
+    return np.where(biased_8 & 0x80, biased_8 - 0x100, biased_8)
 
 
 def build_test_signal(window_ms: float = WINDOW_MS) -> hw_int:
@@ -185,12 +188,13 @@ async def chip_matches_python_over_pitches(dut):
     audio_hw  = build_test_signal()
     n_samples = len(audio_hw)
 
-    # The chip only sees 12 bits of the audio (ADC quantisation). Re-quantise
-    # the Python-side audio the same way so the reference matches what the
-    # vocoder actually consumes inside the chip.
-    adc_codes      = q12_to_dac12(audio_hw.val)
-    chip_audio_q12 = adc12_to_q12(adc_codes)
-    chip_audio_hw  = hw_int(chip_audio_q12, bits=vfp.ADC_BITS, frac_bits=vfp.DATA_FRAC)
+    # The chip only sees 8 bits of the audio (12-bit ADC truncated to top 8).
+    # Re-quantise the Python-side audio the same way so the reference matches
+    # what the vocoder actually consumes inside the chip. The round-trip is
+    # lossless for any 8-bit input, but we keep the dance explicit for clarity.
+    adc_codes      = q7_to_dac12(audio_hw.val)
+    chip_audio_q7  = adc12_to_q7(adc_codes)
+    chip_audio_hw  = hw_int(chip_audio_q7, bits=vfp.ADC_BITS, frac_bits=vfp.DATA_FRAC)
 
     adc = MockMcp3201(dut)
     dac = MockMcp4921(dut)
@@ -214,8 +218,10 @@ async def chip_matches_python_over_pitches(dut):
         dut.ui_in.value = pitch_byte
         dut.rst_n.value = 1
 
-        # Wait until the DAC has received all n_samples writes.
-        timeout_cycles = n_samples * 600 + 5_000        # ~520 cycles/sample + margin
+        # Wait until the DAC has received all n_samples writes. The serial
+        # multiplier puts the chip at ~1200 cycles/sample (256 ADC + 673 vocoder
+        # + 256 DAC); 2000 leaves headroom.
+        timeout_cycles = n_samples * 2_000 + 10_000
         for _ in range(timeout_cycles // 50):
             if len(dac.captured) >= n_samples:
                 break
@@ -231,7 +237,7 @@ async def chip_matches_python_over_pitches(dut):
         # 12-bit DAC formula.
         saw_hw   = chip_sawtooth(n_samples, pitch_byte)
         ref      = vfp.process(chip_audio_hw, saw_hw)
-        ref_dac  = q12_to_dac12(ref.val)
+        ref_dac  = q7_to_dac12(ref.val)
 
         captured = np.asarray(dac.captured[:n_samples], dtype=np.int64)
         diff     = captured - ref_dac

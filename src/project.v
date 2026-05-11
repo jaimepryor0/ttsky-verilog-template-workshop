@@ -77,11 +77,11 @@ module tt_um_JAIMEPRYOR0_VGA_YAY(
     );
 
     // ─── Sawtooth NCO + vocoder (clock-enabled at audio sample rate) ────────
-    reg  signed [12:0] mic_q12;             // latched ADC reading in Q1.12
-    reg  signed [12:0] dac_q12;             // captured vocoder out for DAC
+    reg  signed [7:0]  mic_q7;              // latched ADC reading in Q1.7
+    reg  signed [7:0]  dac_q7;              // captured vocoder out for DAC
     reg                sample_en;           // 1-cycle start pulse per sample
-    wire signed [12:0] saw_q12;
-    wire signed [12:0] vocoder_out;
+    wire signed [7:0]  saw_q7;
+    wire signed [7:0]  vocoder_out;
     wire               vocoder_done;        // pulses when vocoder_out is fresh
 
     pitch u_pitch (
@@ -89,41 +89,42 @@ module tt_um_JAIMEPRYOR0_VGA_YAY(
         .rst_n    (rst_n),
         .en       (sample_en),
         .increment({ui_in, 24'b0}),         // ui_in maps to top 8 bits of 32
-        .out      (saw_q12)
+        .out      (saw_q7)
     );
 
-    // Coefficients (Q2.11) generated from vocoder_fixed_point.VOICE_BANDS at FS=48k.
-    // Re-run test/test_vocoder._design_parameters() if those values change.
+    // Coefficients (Q2.6) generated from vocoder_fixed_point.VOICE_BANDS at FS=48k.
+    // ENV_b0=1 (= 1/64) because (1-alpha) at the chosen 100 Hz cutoff lands
+    // just inside Q2.6 resolution -- 20 Hz would quantise to 0.
     vocoder #(
-        .B1_b0( 13'sd102 ), .B1_b1( 13'sd0   ), .B1_b2(-13'sd102 ),
-        .B1_a1(-13'sd3885), .B1_a2( 13'sd1844),
-        .B2_b0( 13'sd184 ), .B2_b1( 13'sd0   ), .B2_b2(-13'sd184 ),
-        .B2_a1(-13'sd3697), .B2_a2( 13'sd1681),
-        .B3_b0( 13'sd433 ), .B3_b1( 13'sd0   ), .B3_b2(-13'sd433 ),
-        .B3_a1(-13'sd2896), .B3_a2( 13'sd1182),
-        .ENV_b0(13'sd5),    .ENV_a1(-13'sd2043)
+        .B1_b0( 8'sd3  ), .B1_b1( 8'sd0 ), .B1_b2(-8'sd3  ),
+        .B1_a1(-8'sd121), .B1_a2( 8'sd58),
+        .B2_b0( 8'sd6  ), .B2_b1( 8'sd0 ), .B2_b2(-8'sd6  ),
+        .B2_a1(-8'sd116), .B2_a2( 8'sd53),
+        .B3_b0( 8'sd14 ), .B3_b1( 8'sd0 ), .B3_b2(-8'sd14 ),
+        .B3_a1(-8'sd91 ), .B3_a2( 8'sd37),
+        .ENV_b0(8'sd1),   .ENV_a1(-8'sd63)
     ) u_vocoder (
         .clk  (clk),
         .rst_n(rst_n),
         .start(sample_en),
         .done (vocoder_done),
-        .mic  (mic_q12),
-        .saw  (saw_q12),
+        .mic  (mic_q7),
+        .saw  (saw_q7),
         .out  (vocoder_out)
     );
 
     // ─── Sample format conversions ──────────────────────────────────────────
     // MCP3201: 16 SCK with the 12 data bits in spi_rx[13:2] (null bit at [14],
-    // sampling/trailing bits elsewhere). Bias is around 2048 = 0V. Promote to
-    // 13-bit signed Q1.12 by toggling the MSB and shifting left by 1 so that
-    // the 12 ADC bits sit in the top 12 bits of Q1.12 (LSB held at 0).
+    // sampling/trailing bits elsewhere). Bias is around 2048 = 0V. Drop the
+    // bottom 4 ADC bits and toggle the MSB to produce 8-bit signed Q1.7.
     wire [11:0] adc_unsigned = spi_rx[13:2];
-    wire signed [12:0] adc_q12 = {~adc_unsigned[11], adc_unsigned[10:0], 1'b0};
+    wire signed [7:0] adc_q7 = {~adc_unsigned[11], adc_unsigned[10:4]};
 
     // MCP4921 write word: {A/B, BUF, ~GA, ~SHDN, D11..D0}. Channel A,
-    // unbuffered, 1× gain, active = 4'b0011. Convert 13-bit Q1.12 to 12-bit
-    // unsigned offset binary by toggling the sign bit and dropping the LSB.
-    wire [11:0] dac_data    = {~dac_q12[12], dac_q12[11:1]};
+    // unbuffered, 1× gain, active = 4'b0011. Convert 8-bit Q1.7 to 12-bit
+    // unsigned offset binary by toggling the sign bit and zero-padding the
+    // bottom 4 LSBs.
+    wire [11:0] dac_data    = {~dac_q7[7], dac_q7[6:0], 4'b0000};
     wire [15:0] dac_tx_word = {4'b0011, dac_data};
 
     // ─── Controller FSM ─────────────────────────────────────────────────────
@@ -146,8 +147,8 @@ module tt_um_JAIMEPRYOR0_VGA_YAY(
             state      <= S_IDLE;
             spi_start  <= 1'b0;
             spi_tx     <= 16'h0000;
-            mic_q12    <= 13'sd0;
-            dac_q12    <= 13'sd0;
+            mic_q7     <= 8'sd0;
+            dac_q7     <= 8'sd0;
             sample_en  <= 1'b0;
             target_dac <= 1'b0;
         end else begin
@@ -164,8 +165,8 @@ module tt_um_JAIMEPRYOR0_VGA_YAY(
 
                 S_ADC_WAIT: begin
                     if (spi_done) begin
-                        mic_q12 <= adc_q12;
-                        state   <= S_STEP;
+                        mic_q7 <= adc_q7;
+                        state  <= S_STEP;
                     end
                 end
 
@@ -176,8 +177,8 @@ module tt_um_JAIMEPRYOR0_VGA_YAY(
 
                 S_VOC_WAIT: begin
                     if (vocoder_done) begin
-                        dac_q12 <= vocoder_out;
-                        state   <= S_DAC_REQ;
+                        dac_q7 <= vocoder_out;
+                        state  <= S_DAC_REQ;
                     end
                 end
 
@@ -205,17 +206,17 @@ module tt_um_JAIMEPRYOR0_VGA_YAY(
     // ─── 1-bit Σ-Δ audio output (for Mike's Audio PMOD) ─────────────────────
     // First-order modulator on the biased unsigned value. uo_out[7] toggles
     // at chip clock rate; an external RC + amplifier integrates back to audio.
-    reg [13:0] sd_acc;
-    wire [12:0] vocoder_unsigned = vocoder_out ^ 13'h1000;
+    reg [8:0] sd_acc;
+    wire [7:0] vocoder_unsigned = vocoder_out ^ 8'h80;
 
     always @(posedge clk) begin
         if (~rst_n)
-            sd_acc <= 14'd0;
+            sd_acc <= 9'd0;
         else
-            sd_acc <= {1'b0, sd_acc[12:0]} + {1'b0, vocoder_unsigned};
+            sd_acc <= {1'b0, sd_acc[7:0]} + {1'b0, vocoder_unsigned};
     end
 
-    assign uo_out[7]   = sd_acc[13];
+    assign uo_out[7]   = sd_acc[8];
     assign uo_out[6:0] = {state, target_dac, spi_done, spi_cs_n, sck};
 
 endmodule

@@ -20,10 +20,10 @@ from filter_df2 import filter_df2_hw
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 FS        = 48_000
-ADC_BITS  = 13
-DATA_FRAC = 12      # Q1.12: audio in (-1, 1), maps to full ADC range
-COEF_BITS = 13
-COEF_FRAC = 11      # SOS biquad a[] always within (-2, 2); Q2.11 keeps that headroom
+ADC_BITS  = 8
+DATA_FRAC = 7       # Q1.7: audio in (-1, 1), 12-bit ADC truncated to top 8 bits
+COEF_BITS = 8
+COEF_FRAC = 6       # Q2.6: keeps SOS biquot a[] within (-2, 2); coarse but stable
 SAW_FREQ  = 500     # Hz
 
 # Voice bands: log-spaced to match vocal tract resonance structure
@@ -38,9 +38,12 @@ VOICE_BANDS = [
 
 FILTER_ORDER = 1    # Butterworth order; bandpass transform doubles it → 1 SOS section
 
-# Envelope LP smoother: ~20 Hz cutoff, one-pole IIR
-ENV_FC    = 20.0
-ENV_ALPHA = float(np.exp(-2.0 * np.pi * ENV_FC / FS))  # ≈ 0.9974
+# Envelope LP smoother: ~100 Hz cutoff. At Q2.6 the original 20 Hz cutoff
+# would quantise b0 = (1 - alpha) to literal 0 -- filter dies. 100 Hz gives
+# b0=1, a1=-63 at Q2.6 (effective cutoff ~120 Hz). Faster envelope tracking
+# than before, but still well below voice band-limit.
+ENV_FC    = 100.0
+ENV_ALPHA = float(np.exp(-2.0 * np.pi * ENV_FC / FS))
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
