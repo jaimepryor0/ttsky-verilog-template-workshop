@@ -117,7 +117,9 @@ module tt_um_JAIMEPRYOR0_VGA_YAY(
     // MCP3201: 16 SCK with the 12 data bits in spi_rx[13:2] (null bit at [14],
     // sampling/trailing bits elsewhere). Bias is around 2048 = 0V. Drop the
     // bottom 4 ADC bits and toggle the MSB to produce 8-bit signed Q1.7.
-    wire [11:0] adc_unsigned = spi_rx[13:2];
+    /* verilator lint_off UNUSEDSIGNAL */
+    wire [11:0] adc_unsigned = spi_rx[13:2];   // bottom 4 bits dropped on truncate
+    /* verilator lint_on UNUSEDSIGNAL */
     wire signed [7:0] adc_q7 = {~adc_unsigned[11], adc_unsigned[10:4]};
 
     // MCP4921 write word: {A/B, BUF, ~GA, ~SHDN, D11..D0}. Channel A,
