@@ -1,3 +1,10 @@
 pytest==8.4.2
 cocotb==2.0.1
 pillow==12.1.1
+numpy
+scipy
+soundfile
+matplotlib
+# cocotbext-spi 0.5.0 on PyPI doesn't work with cocotb 2.x (BaseClock import);
+# main branch has the fix:
+cocotbext-spi @ git+https://github.com/schang412/cocotbext-spi.git@main
