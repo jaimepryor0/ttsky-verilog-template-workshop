@@ -145,12 +145,15 @@ def process(audio_hw: hw_int,
         _dump(product,  f'05_product_band{i}_{flo}-{fhi}Hz')
         products.append(product)
 
-    # Sum the per-band env*saw products and truncate back to the data
-    # format -- matches vocoder.v's modular accumulation into `out`.
-    acc = products[0]
+    # Saturating accumulation of the per-band env*saw products: matches
+    # vocoder.v's 9-bit add + clamp-to-Q1.7 in the SBF post-mul phase.
+    # hw_int.__add__ does modular wrap; we do the clip outside.
+    sat_max =  2**(ADC_BITS - 1) - 1
+    sat_min = -2**(ADC_BITS - 1)
+    acc_val = products[0].val.astype(np.int64).copy()
     for p in products[1:]:
-        acc = acc + p
-    acc = acc.truncate(ADC_BITS, DATA_FRAC)
+        acc_val = np.clip(acc_val + p.val.astype(np.int64), sat_min, sat_max)
+    acc = hw_int(acc_val, bits=ADC_BITS, frac_bits=DATA_FRAC)
     _dump(acc, '06_output')
     return acc
 

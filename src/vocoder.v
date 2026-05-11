@@ -34,7 +34,10 @@ module vocoder(clk, rst_n, start, done, mic, saw, out);
 // Interface:
 //   start - 1-cycle pulse to begin processing one sample using the current
 //           mic and saw inputs (latched internally on the pulse).
-//   done  - 1-cycle pulse on the cycle that `out` first holds the new sample.
+//   done  - LEVEL signal. Goes low on `start` (output is stale, recomputing)
+//           and back high on the cycle the new sample is registered into
+//           `out`. Stays high until the next start. Consumers can either
+//           watch for the 0->1 transition or just poll the level.
 //   Further `start` pulses while running are ignored.
 
     input  wire              clk;
@@ -199,6 +202,13 @@ module vocoder(clk, rst_n, start, done, mic, saw, out);
     wire signed [7:0] prod_trunc_filt   = mul_prod[13:6];
     wire signed [7:0] prod_trunc_envsaw = mul_prod[14:7];
 
+    // Saturating accumulator for the env*sbf products. The previous
+    // 8-bit modular add wrapped on overflow, producing audible "clicks"
+    // when the band products summed past +-1.0. Clamp to the Q1.7 range.
+    wire signed [8:0] out_sum     = {out[7], out} + {prod_trunc_envsaw[7], prod_trunc_envsaw};
+    wire signed [7:0] out_clipped = (out_sum >  9'sd127)  ?  8'sd127 :
+                                    (out_sum < -9'sd128)  ? -8'sd128 : out_sum[7:0];
+
     // --- FSM ---
     always @(posedge clk) begin
         if (~rst_n) begin
@@ -211,10 +221,12 @@ module vocoder(clk, rst_n, start, done, mic, saw, out);
             m_acc     <= 8'sd0;
             m_b       <= 8'd0;
         end else begin
-            done <= 1'b0;
+            // done has level semantics: it holds its value unless a new
+            // start arrives (clear) or a sample finishes (set).
             if (!busy) begin
                 if (start) begin
                     busy      <= 1'b1;
+                    done      <= 1'b0;      // output is now stale, recomputing
                     filt_idx  <= 3'd0;
                     mac_phase <= 3'd0;
                     sub_cnt   <= 4'd0;
@@ -237,8 +249,9 @@ module vocoder(clk, rst_n, start, done, mic, saw, out);
                     sub_cnt <= 4'd0;
 
                     if (mac_phase == 3'd4) begin
-                        // SBF post-mul: accumulate env*sbf into output reg.
-                        out <= out + prod_trunc_envsaw;
+                        // SBF post-mul: accumulate env*sbf into output reg
+                        // with saturating clip (Q1.7 range).
+                        out <= out_clipped;
                         if (filt_idx == 3'd5) begin
                             done      <= 1'b1;
                             busy      <= 1'b0;

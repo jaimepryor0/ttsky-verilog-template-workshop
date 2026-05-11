@@ -13,9 +13,14 @@
  *   ui_in[6:0]    audio input sample (7-bit signed Q1.6)
  *   ui_in[7]      input valid (rising edge latches the sample + starts a cycle)
  *   uo_out[6:0]   audio output sample (7-bit signed Q1.6; top 7 bits of the
- *                 vocoder's 8-bit Q1.7 result)
- *   uo_out[7]     output valid (1-clk high pulse when uo_out[6:0] is fresh)
- *   uio_in[7:0]   pitch byte; NCO frequency ~ FS * pitch / 256
+ *                 vocoder's 8-bit Q1.7 result, saturating-clipped)
+ *   uo_out[7]     output valid (LEVEL: drops to 0 when a new start is seen,
+ *                 rises to 1 when the new sample is registered; stays high
+ *                 between samples. Async consumers can poll or edge-trigger.)
+ *   uio_in[7:6]   carrier waveform select (0=saw, 1=inv saw, 2=square, 3=tri)
+ *   uio_in[5:0]   pitch byte (6-bit; mapped to the top 6 bits of an 8-bit NCO
+ *                 increment so the frequency range matches the 8-bit version,
+ *                 just with 4x coarser steps)
  *   uio_out / uio_oe   driven low (uio used as input only)
  *
  * SPDX-License-Identifier: Apache-2.0
@@ -62,14 +67,22 @@ module tt_um_JAIMEPRYOR0_VGA_YAY(
     // precision loss we accept in exchange for the 7+1 packing.
     wire signed [7:0] mic_q7 = {ui_in[6:0], 1'b0};
     wire signed [7:0] saw_q7;
+    // vocoder_out[0] is the discarded LSB of the 8-bit Q1.7 result; only
+    // the top 7 bits land on the pin.
+    /* verilator lint_off UNUSEDSIGNAL */
     wire signed [7:0] vocoder_out;
+    /* verilator lint_on UNUSEDSIGNAL */
     wire              vocoder_done;
 
+    // Pitch byte is the bottom 6 bits of uio_in, scaled into the top 6 bits
+    // of an 8-bit increment so we keep the full frequency range (the bottom
+    // two phase-increment bits would have been < 1 bin per sample anyway).
     pitch u_pitch (
         .clk      (clk),
         .rst_n    (rst_n),
         .en       (start_pulse),
-        .increment(uio_in),
+        .increment({uio_in[5:0], 2'b00}),
+        .mode     (uio_in[7:6]),
         .out      (saw_q7)
     );
 

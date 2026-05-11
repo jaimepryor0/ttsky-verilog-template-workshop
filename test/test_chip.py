@@ -34,19 +34,43 @@ from hw_int import hw_int  # noqa: E402
 CLK_PERIOD_NS = 40                                  # 25 MHz chip clock
 WINDOW_MS     = 20                                  # 20 ms ≈ 960 samples
 AUDIO_PATH    = os.path.join(_SRC, 'hello.wav')
-PITCHES       = [1, 2, 4, 8, 16]
+# uio_byte = {mode[1:0], pitch[5:0]}. Spread the test across all four
+# carrier modes (0=saw, 1=saw-down, 2=square, 3=triangle) and a few
+# pitches to exercise both axes of the new pin layout.
+UIO_BYTES     = [0x01, 0x02, 0x04, 0x08, 0x10,      # mode 0 (saw up)
+                 0x42, 0x84, 0xC4]                  # modes 1..3 at pitch=2,4,4
 
 
 # ─── Bit-exact helpers ─────────────────────────────────────────────────────
 
-def chip_sawtooth(n_samples: int, pitch_byte: int) -> hw_int:
-    """Replica of pitch.v's 8-bit NCO."""
-    inc   = pitch_byte & 0xFF
-    phase = 0x80
-    out   = np.zeros(n_samples, dtype=np.int64)
+def chip_carrier(n_samples: int, uio_byte: int) -> hw_int:
+    """Replica of pitch.v: 8-bit NCO + waveform selector.
+
+    uio_byte layout matches the chip:
+      bits [7:6] = waveform mode  (0=saw up, 1=saw down, 2=square, 3=triangle)
+      bits [5:0] = 6-bit pitch byte; project.v promotes it to the top 6 bits
+                   of an 8-bit phase increment (multiply by 4).
+    """
+    mode   = (uio_byte >> 6) & 0x3
+    pitch6 = uio_byte & 0x3F
+    inc    = (pitch6 << 2) & 0xFF
+    phase  = 0x80
+    out    = np.zeros(n_samples, dtype=np.int64)
     for n in range(n_samples):
-        out[n] = phase - 0x100 if (phase & 0x80) else phase
-        phase  = (phase + inc) & 0xFF
+        saw_u  = phase & 0xFF
+        saw_s  = saw_u - 0x100 if (saw_u & 0x80) else saw_u
+        abs_saw = -saw_s if saw_s < 0 else saw_s        # 0..128
+        if mode == 0:
+            out[n] = saw_s
+        elif mode == 1:
+            out[n] = (~saw_s) & 0xFF                     # bit-invert
+            if out[n] & 0x80:
+                out[n] -= 0x100
+        elif mode == 2:
+            out[n] = -64 if (saw_u & 0x80) else 63
+        else:  # mode == 3 (triangle)
+            out[n] = abs_saw - 64
+        phase = (phase + inc) & 0xFF
     return hw_int(out, bits=vfp.ADC_BITS, frac_bits=vfp.DATA_FRAC)
 
 
@@ -98,12 +122,15 @@ async def chip_matches_python_over_pitches(dut):
     dut.uio_in.value = 0
     await ClockCycles(dut.clk, 5)
 
-    for pitch_byte in PITCHES:
-        dut._log.info(f"─────────── pitch_byte = {pitch_byte} ───────────")
+    for uio_byte in UIO_BYTES:
+        mode    = (uio_byte >> 6) & 0x3
+        pitch6  =  uio_byte       & 0x3F
+        mode_lbl = ['saw', 'saw-down', 'square', 'triangle'][mode]
+        dut._log.info(f"─────────── uio=0x{uio_byte:02X} (mode={mode_lbl}, pitch={pitch6}) ───────────")
 
         dut.rst_n.value  = 0
         await ClockCycles(dut.clk, 10)
-        dut.uio_in.value = pitch_byte
+        dut.uio_in.value = uio_byte
         dut.ui_in.value  = 0
         dut.rst_n.value  = 1
         await ClockCycles(dut.clk, 2)
@@ -127,7 +154,7 @@ async def chip_matches_python_over_pitches(dut):
         # Python reference: feed the same padded 8-bit audio + matching
         # sawtooth into vfp.process, then drop the LSB to land back in the
         # 7-bit pin format.
-        saw_hw   = chip_sawtooth(n_samples, pitch_byte)
+        saw_hw   = chip_carrier(n_samples, uio_byte)
         ref_q7   = vfp.process(chip_audio_hw, saw_hw)
         ref_pin7 = q7_to_pin7(ref_q7.val)
 
@@ -141,16 +168,16 @@ async def chip_matches_python_over_pitches(dut):
                 for i in head
             )
             raise AssertionError(
-                f"pitch={pitch_byte}: {bad.size}/{n_samples} samples differ "
+                f"uio=0x{uio_byte:02X}: {bad.size}/{n_samples} samples differ "
                 f"from Python reference (first {len(head)} shown):\n{details}"
             )
 
         dut._log.info(
-            f"pitch={pitch_byte}: all {n_samples} samples match Python reference."
+            f"uio=0x{uio_byte:02X}: all {n_samples} samples match Python reference."
         )
 
     dut._log.info(
-        f"All {len(PITCHES)} pitches produced bit-exact output against the Python model."
+        f"All {len(UIO_BYTES)} uio configurations produced bit-exact output against the Python model."
     )
 
 
