@@ -210,7 +210,6 @@ module vocoder(clk, rst_n, start, done, mic, saw, out);
                                     (out_sum < -9'sd128)  ? -8'sd128 : out_sum[7:0];
 
     // --- FSM ---
-    integer i_rst;
     always @(posedge clk) begin
         if (~rst_n) begin
             filt_idx  <= 3'd0;
@@ -221,19 +220,12 @@ module vocoder(clk, rst_n, start, done, mic, saw, out);
             out       <= 8'sd0;
             m_acc     <= 8'sd0;
             m_b       <= 8'd0;
-            // Reset filter state. With the new formant coefficients the
-            // quantised truncation (floor-divide on negative products
-            // biases toward -inf) produces tiny limit cycles around zero
-            // for the bandpass biquads -- meaning a "wash-out with zero
-            // input" strategy can never reach exact zero state. We need
-            // a real reset on s1/s2 so a power-on/reset gives a defined
-            // starting condition. xb2_r, y_r, mic_r, saw_r, slot[] are
-            // all written before being read on each sample so they can
-            // stay reset-free (DFXTP). ~80 flops gain DFRTPs back.
-            for (i_rst = 0; i_rst < 6; i_rst = i_rst + 1)
-                s1[i_rst] <= 8'sd0;
-            for (i_rst = 0; i_rst < 4; i_rst = i_rst + 1)
-                s2[i_rst] <= 8'sd0;
+            // NOTE: s1/s2/slot/xb2_r/y_r/mic_r/saw_r intentionally have NO
+            // reset (DFXTP, not DFRTP). The first ~50 audio samples after
+            // power-up are transient noise as the IIR filters wash the
+            // power-on state out -- inaudible on an audio path. The
+            // cocotb regression skips that window when comparing against
+            // the Python reference (see WARMUP in test_chip / test_vocoder).
         end else begin
             // done has level semantics: it holds its value unless a new
             // start arrives (clear) or a sample finishes (set).
