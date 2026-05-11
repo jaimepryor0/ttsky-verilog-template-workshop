@@ -79,9 +79,10 @@ module tt_um_JAIMEPRYOR0_VGA_YAY(
     // ─── Sawtooth NCO + vocoder (clock-enabled at audio sample rate) ────────
     reg  signed [15:0] mic_q15;             // latched ADC reading in Q1.15
     reg  signed [15:0] dac_q15;             // captured vocoder out for DAC
-    reg                sample_en;           // 1-cycle pulse per audio sample
+    reg                sample_en;           // 1-cycle start pulse per sample
     wire signed [15:0] saw_q15;
     wire signed [15:0] vocoder_out;
+    wire               vocoder_done;        // pulses when vocoder_out is fresh
 
     pitch u_pitch (
         .clk      (clk),
@@ -104,7 +105,8 @@ module tt_um_JAIMEPRYOR0_VGA_YAY(
     ) u_vocoder (
         .clk  (clk),
         .rst_n(rst_n),
-        .en   (sample_en),
+        .start(sample_en),
+        .done (vocoder_done),
         .mic  (mic_q15),
         .saw  (saw_q15),
         .out  (vocoder_out)
@@ -128,16 +130,16 @@ module tt_um_JAIMEPRYOR0_VGA_YAY(
     wire [15:0] dac_tx_word = {4'b0011, dac_data};
 
     // ─── Controller FSM ─────────────────────────────────────────────────────
-    //   IDLE → ADC_WAIT → STEP → DAC_REQ → DAC_WAIT → IDLE
-    // The STEP state holds for one cycle so that:
-    //   * mic_q15 latches before vocoder advances
-    //   * dac_q15 captures y[n] (the value of vocoder_out _before_ state advances)
-    //   * sample_en pulses for exactly one chip clock
+    //   IDLE → ADC_WAIT → STEP → VOC_WAIT → DAC_REQ → DAC_WAIT → IDLE
+    // STEP pulses sample_en for one cycle, kicking off the serial vocoder
+    // (and advancing the pitch NCO). VOC_WAIT blocks until vocoder_done
+    // pulses, at which point dac_q15 latches the freshly-computed sample.
     localparam S_IDLE     = 3'd0;
     localparam S_ADC_WAIT = 3'd1;
     localparam S_STEP     = 3'd2;
-    localparam S_DAC_REQ  = 3'd3;
-    localparam S_DAC_WAIT = 3'd4;
+    localparam S_VOC_WAIT = 3'd3;
+    localparam S_DAC_REQ  = 3'd4;
+    localparam S_DAC_WAIT = 3'd5;
 
     reg [2:0] state;
     reg       target_dac;                  // routes shared CS to the right slave
@@ -171,9 +173,15 @@ module tt_um_JAIMEPRYOR0_VGA_YAY(
                 end
 
                 S_STEP: begin
-                    sample_en <= 1'b1;          // advance vocoder + NCO one sample
-                    dac_q15   <= vocoder_out;   // captured before state advances
-                    state     <= S_DAC_REQ;
+                    sample_en <= 1'b1;          // kick off vocoder + advance NCO
+                    state     <= S_VOC_WAIT;
+                end
+
+                S_VOC_WAIT: begin
+                    if (vocoder_done) begin
+                        dac_q15 <= vocoder_out;
+                        state   <= S_DAC_REQ;
+                    end
                 end
 
                 S_DAC_REQ: begin

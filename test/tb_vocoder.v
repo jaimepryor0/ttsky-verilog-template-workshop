@@ -29,17 +29,16 @@ module tb_vocoder ();
     parameter signed [15:0] ENV_a1 = 16'sd0;
 
     // ── DUT-facing nets (driven by cocotb) ─────────────────────────────
-    reg                clk = 1'b0;
+    reg                clk   = 1'b0;
     reg                rst_n = 1'b0;
-    reg  signed [15:0] mic = 16'sd0;
-    reg  signed [15:0] saw = 16'sd0;
+    reg  signed [15:0] mic   = 16'sd0;
+    reg  signed [15:0] saw   = 16'sd0;
     wire signed [15:0] out;
 
-    // The chip-level integration only pulses `en` at audio-sample rate, but
-    // cocotb can drive this directly to test both:
-    //   - en tied high (one sample per clock)
-    //   - random-gated en (idle cycles between sample-advancing pulses)
-    reg en = 1'b1;
+    // Vocoder uses a start/done handshake: pulse `start` for one cycle
+    // with the desired mic/saw, then wait for `done` to sample `out`.
+    reg  start = 1'b0;
+    wire done;
 
 `ifndef VERILATOR
     initial begin
@@ -59,7 +58,8 @@ module tb_vocoder ();
     ) dut (
         .clk  (clk),
         .rst_n(rst_n),
-        .en   (en),
+        .start(start),
+        .done (done),
         .mic  (mic),
         .saw  (saw),
         .out  (out)
