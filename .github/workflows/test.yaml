@@ -20,7 +20,7 @@ jobs:
       - name: Install Python packages
         run: pip install -r test/requirements.txt
 
-      - name: Verilator lint (top: tt_um_JAIMEPRYOR0_VGA_YAY)
+      - name: Verilator lint
         run: |
           verilator --lint-only -Wall \
             --top-module tt_um_JAIMEPRYOR0_VGA_YAY \
