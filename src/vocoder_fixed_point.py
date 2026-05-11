@@ -101,67 +101,66 @@ def save_hw(x: hw_int, path: str, fs: int = FS) -> None:
 
 # ── Main pipeline ─────────────────────────────────────────────────────────────
 
-def run(audio_path: str, dump_dir: str | None = None) -> hw_int:
+def process(audio_hw: hw_int,
+            saw_hw: hw_int | None = None,
+            dump: bool = False,
+            dump_dir: str = 'debug_out') -> hw_int:
     """
-    dump_dir: if set, writes every intermediate stage as a WAV into that directory.
+    Run the fixed-point vocoder chain on a Q1.15 audio signal and return the
+    16-bit Q1.15 output. This is the bit-exact reference for vocoder.v.
+
+    audio_hw : Q1.15 hw_int input (mic signal).
+    saw_hw   : Q1.15 sawtooth to use as the carrier. Auto-generated from
+               len(audio_hw) if None.
+    dump     : if True, writes every intermediate stage as a WAV into dump_dir.
     """
     import os
 
     def _dump(x: hw_int, name: str) -> None:
-        if dump_dir is not None:
+        if dump:
+            os.makedirs(dump_dir, exist_ok=True)
             save_hw(x, os.path.join(dump_dir, name + '.wav'))
 
-    # Load and (if needed) resample to FS
+    if saw_hw is None:
+        saw_hw = _generate_sawtooth(len(audio_hw))
+    _dump(audio_hw, '00_audio_in')
+    _dump(saw_hw,   '03_sawtooth_raw')
+
+    products: list[hw_int] = []
+    for i, (flo, fhi) in enumerate(VOICE_BANDS, start=1):
+        sections = _design_bandpass(flo, fhi)
+        mic_band = _filter_sos(sections, audio_hw)
+        env      = _envelope_detect(mic_band)
+        saw_band = _filter_sos(sections, saw_hw)
+        product  = (env * saw_band).truncate(ADC_BITS, DATA_FRAC)
+        _dump(mic_band, f'01_mic_band{i}_{flo}-{fhi}Hz')
+        _dump(env,      f'02_env_band{i}_{flo}-{fhi}Hz')
+        _dump(saw_band, f'04_saw_band{i}_{flo}-{fhi}Hz')
+        _dump(product,  f'05_product_band{i}_{flo}-{fhi}Hz')
+        products.append(product)
+
+    # Each __add__ adds one guard bit; final truncate back to Q1.15
+    # matches the wide-add + slice in vocoder.v's adder.
+    acc = (products[0] + products[1] + products[2]).truncate(ADC_BITS, DATA_FRAC)
+    _dump(acc, '06_output')
+    return acc
+
+
+def load_audio(audio_path: str) -> hw_int:
+    """Load a WAV file, downmix to mono, resample to FS, wrap as Q1.15 hw_int."""
     audio, file_fs = sf.read(audio_path, dtype='float32', always_2d=False)
     if audio.ndim > 1:
         audio = audio[:, 0]
     if file_fs != FS:
         n_out = int(round(len(audio) * FS / file_fs))
         audio = sig.resample(audio, n_out)
+    return hw_int.from_float(audio, bits=ADC_BITS, frac_bits=DATA_FRAC)
 
-    n_samples = len(audio)
 
-    # Wrap audio as hw_int
-    audio_hw = hw_int.from_float(audio, bits=ADC_BITS, frac_bits=DATA_FRAC)
-    _dump(audio_hw, '00_audio_in')
-
-    # Design filters, filter audio, envelope-detect each band
-    audio_envs: list[hw_int] = []
-    band_sections: list[list[tuple[hw_int, hw_int]]] = []
-
-    for i, (flo, fhi) in enumerate(VOICE_BANDS):
-        sections = _design_bandpass(flo, fhi)
-        band_sections.append(sections)
-
-        mic_band = _filter_sos(sections, audio_hw)
-        _dump(mic_band, f'01_mic_band{i+1}_{flo}-{fhi}Hz')
-        
-        env = _envelope_detect(mic_band)
-        _dump(env, f'02_env_band{i+1}_{flo}-{fhi}Hz')
-        audio_envs.append(env)
-
-    # Generate sawtooth, apply same bandpass filters
-    saw_hw = _generate_sawtooth(n_samples)
-    _dump(saw_hw, '03_sawtooth_raw')
-
-    saw_bands: list[hw_int] = []
-    for i, (sections, (flo, fhi)) in enumerate(zip(band_sections, VOICE_BANDS)):
-        saw_band = _filter_sos(sections, saw_hw)
-        _dump(saw_band, f'04_saw_band{i+1}_{flo}-{fhi}Hz')
-        saw_bands.append(saw_band)
-
-    # Multiply each sawtooth band by its audio envelope, truncate back to data format
-    products: list[hw_int] = []
-    for i, (env, saw_band, (flo, fhi)) in enumerate(zip(audio_envs, saw_bands, VOICE_BANDS)):
-        product = (env * saw_band).truncate(ADC_BITS, DATA_FRAC)
-        _dump(product, f'05_product_band{i+1}_{flo}-{fhi}Hz')
-        products.append(product)
-
-    # Accumulate — each __add__ adds one guard bit (ADC_BITS → +2 after two sums)
-    acc = products[0] + products[1]
-    acc = acc + products[2]
-    _dump(acc, '06_output')
-    return acc
+def run(audio_path: str, dump_dir: str | None = None) -> hw_int:
+    """Load audio from a path and run it through process()."""
+    audio_hw = load_audio(audio_path)
+    return process(audio_hw, dump=dump_dir is not None, dump_dir=dump_dir or 'debug_out')
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -181,7 +180,6 @@ if __name__ == '__main__':
 
     print(f"Processing {args.audio} ...")
     result = run(args.audio, dump_dir=args.debug)
-    result = result.truncate(16, 15)
 
     out_path = args.audio.rsplit('.', 1)[0] + '_vocoder_hw.wav'
     save_hw(result, out_path)

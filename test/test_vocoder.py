@@ -59,38 +59,20 @@ from cocotb.triggers import ClockCycles, FallingEdge, Timer  # noqa: E402
 
 
 CLOCK_PERIOD_NS = 100   # one clock = one audio sample
-N_SAMPLES       = 2048
+WINDOW_MS       = 100   # length of audio slice we run through the DUT
+AUDIO_PATH      = os.path.join(_SRC, 'hello.wav')
 
 
-def _python_reference(audio_hw: hw_int, saw_hw: hw_int) -> hw_int:
-    """Run the Python fixed-point pipeline; return 16-bit Q1.15 output."""
-    band_sections = [vfp._design_bandpass(flo, fhi) for flo, fhi in vfp.VOICE_BANDS]
-
-    audio_envs = []
-    for sections in band_sections:
-        mic_band = vfp._filter_sos(sections, audio_hw)
-        env      = vfp._envelope_detect(mic_band)
-        audio_envs.append(env)
-
-    saw_bands = [vfp._filter_sos(s, saw_hw) for s in band_sections]
-
-    products = [(env * sb).truncate(vfp.ADC_BITS, vfp.DATA_FRAC)
-                for env, sb in zip(audio_envs, saw_bands)]
-
-    acc = products[0] + products[1]
-    acc = acc + products[2]
-    return acc.truncate(vfp.ADC_BITS, vfp.DATA_FRAC)
-
-
-def _build_test_signal(n_samples: int) -> hw_int:
-    """Linear chirp 100 Hz → 8 kHz at half scale — sweeps all 3 bands."""
-    fs = vfp.FS
-    t  = np.arange(n_samples) / fs
-    f0, f1 = 100.0, 8000.0
-    duration = n_samples / fs
-    phase = 2 * np.pi * (f0 * t + 0.5 * (f1 - f0) / duration * t * t)
-    audio = 0.5 * np.sin(phase)
-    return hw_int.from_float(audio, vfp.ADC_BITS, vfp.DATA_FRAC)
+def _build_test_signal(audio_path: str = AUDIO_PATH,
+                       window_ms: float = WINDOW_MS) -> hw_int:
+    """Take a window_ms slice of audio_path centred on its absolute peak."""
+    full = vfp.load_audio(audio_path)
+    n = int(round(window_ms * 1e-3 * vfp.FS))
+    if len(full) <= n:
+        return full
+    peak  = int(np.argmax(np.abs(full.val)))
+    start = max(0, min(len(full) - n, peak - n // 2))
+    return full[start:start + n]
 
 
 @cocotb.test()
@@ -106,17 +88,18 @@ async def vocoder_matches_python(dut):
     await FallingEdge(dut.clk)
 
     # Stimulus + reference
-    audio_hw = _build_test_signal(N_SAMPLES)
-    saw_hw   = vfp._generate_sawtooth(N_SAMPLES)
-    expected = _python_reference(audio_hw, saw_hw)
+    audio_hw   = _build_test_signal()
+    n_samples  = len(audio_hw)
+    saw_hw     = vfp._generate_sawtooth(n_samples)
+    expected   = vfp.process(audio_hw, saw_hw)
 
     audio_int = audio_hw.val.astype(np.int64)
     saw_int   = saw_hw.val.astype(np.int64)
     exp_int   = expected.val.astype(np.int64)
 
     # Drive one sample per clock
-    y_dut = np.zeros(N_SAMPLES, dtype=np.int64)
-    for n in range(N_SAMPLES):
+    y_dut = np.zeros(n_samples, dtype=np.int64)
+    for n in range(n_samples):
         await FallingEdge(dut.clk)
         dut.mic.value = int(audio_int[n])
         dut.saw.value = int(saw_int[n])
@@ -132,11 +115,11 @@ async def vocoder_matches_python(dut):
             for i in head
         )
         raise AssertionError(
-            f"DUT differs from Python reference at {bad.size}/{N_SAMPLES} "
+            f"DUT differs from Python reference at {bad.size}/{n_samples} "
             f"samples (first {len(head)} shown):\n{details}"
         )
 
-    dut._log.info(f"All {N_SAMPLES} samples match Python reference exactly.")
+    dut._log.info(f"All {n_samples} samples match Python reference exactly.")
 
 
 # ── Runner entry point (runs outside the simulator) ─────────────────────────
