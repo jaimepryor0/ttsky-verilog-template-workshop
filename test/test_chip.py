@@ -50,28 +50,29 @@ def chip_sawtooth(n_samples: int, pitch_byte: int) -> hw_int:
 
     increment = pitch_byte << 24 (project.v ties ui_in into the top 8 bits of
     the 32-bit phase increment). Phase resets to 0x80000000 so sample 0 = -1.0.
+    Output is the top 13 bits of the phase accumulator reinterpreted as Q1.12.
     """
     increment = (pitch_byte & 0xFF) << 24
     phase     = 0x80000000
     out       = np.zeros(n_samples, dtype=np.int64)
     for n in range(n_samples):
-        top16   = (phase >> 16) & 0xFFFF
-        out[n]  = top16 - 0x10000 if (top16 & 0x8000) else top16
+        top13   = (phase >> 19) & 0x1FFF
+        out[n]  = top13 - 0x2000 if (top13 & 0x1000) else top13
         phase   = (phase + increment) & 0xFFFFFFFF
     return hw_int(out, bits=vfp.ADC_BITS, frac_bits=vfp.DATA_FRAC)
 
 
-def q15_to_dac12(q15: np.ndarray) -> np.ndarray:
-    """project.v: dac_data = (dac_q15 ^ 0x8000)[15:4] — i.e. biased then top 12."""
-    return (((q15.astype(np.int64) & 0xFFFF) ^ 0x8000) >> 4).astype(np.int64)
+def q12_to_dac12(q12: np.ndarray) -> np.ndarray:
+    """project.v: dac_data = {~dac_q12[12], dac_q12[11:1]} — sign-flip MSB, drop LSB."""
+    q12 = q12.astype(np.int64) & 0x1FFF             # 13-bit two's complement
+    return ((q12 ^ 0x1000) >> 1).astype(np.int64)   # toggle sign bit, drop LSB
 
 
-def dac12_to_q15(d12: np.ndarray) -> np.ndarray:
-    """Inverse: the chip's internal Q1.15 view of a 12-bit ADC code (low 4 bits zero)."""
-    biased = (d12.astype(np.int64) << 4) & 0xFFFF
-    out    = (biased ^ 0x8000)
-    # signed wrap
-    return np.where(out & 0x8000, out - 0x10000, out)
+def adc12_to_q12(d12: np.ndarray) -> np.ndarray:
+    """Chip's view of a 12-bit ADC code as Q1.12: flip MSB, shift left by 1."""
+    d12 = d12.astype(np.int64) & 0xFFF
+    biased_13 = ((d12 ^ 0x800) << 1) & 0x1FFF       # 13-bit, LSB held at 0
+    return np.where(biased_13 & 0x1000, biased_13 - 0x2000, biased_13)
 
 
 def build_test_signal(window_ms: float = WINDOW_MS) -> hw_int:
@@ -187,9 +188,9 @@ async def chip_matches_python_over_pitches(dut):
     # The chip only sees 12 bits of the audio (ADC quantisation). Re-quantise
     # the Python-side audio the same way so the reference matches what the
     # vocoder actually consumes inside the chip.
-    adc_codes      = q15_to_dac12(audio_hw.val)
-    chip_audio_q15 = dac12_to_q15(adc_codes)
-    chip_audio_hw  = hw_int(chip_audio_q15, bits=16, frac_bits=15)
+    adc_codes      = q12_to_dac12(audio_hw.val)
+    chip_audio_q12 = adc12_to_q12(adc_codes)
+    chip_audio_hw  = hw_int(chip_audio_q12, bits=vfp.ADC_BITS, frac_bits=vfp.DATA_FRAC)
 
     adc = MockMcp3201(dut)
     dac = MockMcp4921(dut)
@@ -230,7 +231,7 @@ async def chip_matches_python_over_pitches(dut):
         # 12-bit DAC formula.
         saw_hw   = chip_sawtooth(n_samples, pitch_byte)
         ref      = vfp.process(chip_audio_hw, saw_hw)
-        ref_dac  = q15_to_dac12(ref.val)
+        ref_dac  = q12_to_dac12(ref.val)
 
         captured = np.asarray(dac.captured[:n_samples], dtype=np.int64)
         diff     = captured - ref_dac

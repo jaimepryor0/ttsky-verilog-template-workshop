@@ -9,9 +9,9 @@ module vocoder(clk, rst_n, start, done, mic, saw, out);
 //                                                      /
 //   saw -> the same 3 bandpass filters ----------------'
 //
-// 16-bit signed throughout: Q1.15 data, Q2.14 coefficients.
+// 13-bit signed throughout: Q1.12 data, Q2.11 coefficients.
 //
-// Shared-MAC implementation: a single 16x16 signed multiplier is sequenced
+// Shared-MAC implementation: a single 13x13 signed multiplier is sequenced
 // over the 9 internal biquads (3 mic BPF + 3 envelope LPF + 3 saw BPF) plus
 // the 3 envelope*saw post-multiplies. 49 chip clocks per audio sample.
 //
@@ -25,32 +25,32 @@ module vocoder(clk, rst_n, start, done, mic, saw, out);
     input  wire               rst_n;
     input  wire               start;
     output reg                done;
-    input  wire signed [15:0] mic;
-    input  wire signed [15:0] saw;
-    output reg  signed [15:0] out;
+    input  wire signed [12:0] mic;
+    input  wire signed [12:0] saw;
+    output reg  signed [12:0] out;
 
-    // FILTER COEFFICIENTS (Q2.14 signed) //
-    parameter signed [15:0] B1_b0 = 16'sd0; // band 1
-    parameter signed [15:0] B1_b1 = 16'sd0;
-    parameter signed [15:0] B1_b2 = 16'sd0;
-    parameter signed [15:0] B1_a1 = 16'sd0;
-    parameter signed [15:0] B1_a2 = 16'sd0;
+    // FILTER COEFFICIENTS (Q2.11 signed) //
+    parameter signed [12:0] B1_b0 = 13'sd0; // band 1
+    parameter signed [12:0] B1_b1 = 13'sd0;
+    parameter signed [12:0] B1_b2 = 13'sd0;
+    parameter signed [12:0] B1_a1 = 13'sd0;
+    parameter signed [12:0] B1_a2 = 13'sd0;
 
-    parameter signed [15:0] B2_b0 = 16'sd0; // band 2
-    parameter signed [15:0] B2_b1 = 16'sd0;
-    parameter signed [15:0] B2_b2 = 16'sd0;
-    parameter signed [15:0] B2_a1 = 16'sd0;
-    parameter signed [15:0] B2_a2 = 16'sd0;
+    parameter signed [12:0] B2_b0 = 13'sd0; // band 2
+    parameter signed [12:0] B2_b1 = 13'sd0;
+    parameter signed [12:0] B2_b2 = 13'sd0;
+    parameter signed [12:0] B2_a1 = 13'sd0;
+    parameter signed [12:0] B2_a2 = 13'sd0;
 
-    parameter signed [15:0] B3_b0 = 16'sd0; // band 3
-    parameter signed [15:0] B3_b1 = 16'sd0;
-    parameter signed [15:0] B3_b2 = 16'sd0;
-    parameter signed [15:0] B3_a1 = 16'sd0;
-    parameter signed [15:0] B3_a2 = 16'sd0;
+    parameter signed [12:0] B3_b0 = 13'sd0; // band 3
+    parameter signed [12:0] B3_b1 = 13'sd0;
+    parameter signed [12:0] B3_b2 = 13'sd0;
+    parameter signed [12:0] B3_a1 = 13'sd0;
+    parameter signed [12:0] B3_a2 = 13'sd0;
 
     // Envelope LPF: one-pole IIR, b = [1-alpha, 0], a = [1, -alpha]
-    parameter signed [15:0] ENV_b0 = 16'sd0;
-    parameter signed [15:0] ENV_a1 = 16'sd0;
+    parameter signed [12:0] ENV_b0 = 13'sd0;
+    parameter signed [12:0] ENV_a1 = 13'sd0;
 
     ///////////////////////////////////////
     // Filter slot indices
@@ -60,23 +60,23 @@ module vocoder(clk, rst_n, start, done, mic, saw, out);
     ///////////////////////////////////////
 
     // --- Latched inputs (captured when start is sampled high) ---
-    reg signed [15:0] mic_r, saw_r;
+    reg signed [12:0] mic_r, saw_r;
 
-    // --- State RAM: 9 biquads x 2 regs = 36 bytes ---
-    reg signed [15:0] s1 [0:8];
-    reg signed [15:0] s2 [0:8];
+    // --- State RAM: 9 biquads x 2 regs = 234 bits ---
+    reg signed [12:0] s1 [0:8];
+    reg signed [12:0] s2 [0:8];
 
     // --- Filter outputs held for downstream consumption ---
-    reg signed [15:0] bf_y  [0:2];   // mic BPF outputs (feed envelope LPFs)
-    reg signed [15:0] env_y [0:2];   // envelope outputs (feed final multiplies)
-    reg signed [15:0] sbf_y;         // current saw BPF output (consumed immediately)
+    reg signed [12:0] bf_y  [0:2];   // mic BPF outputs (feed envelope LPFs)
+    reg signed [12:0] env_y [0:2];   // envelope outputs (feed final multiplies)
+    reg signed [12:0] sbf_y;         // current saw BPF output (consumed immediately)
 
     // --- Per-filter MAC intermediates ---
-    reg signed [15:0] xb0_r, xb1_r, xb2_r, ya1_r;
-    reg signed [15:0] y_r;
+    reg signed [12:0] xb0_r, xb1_r, xb2_r, ya1_r;
+    reg signed [12:0] y_r;
 
-    // --- Output accumulator ---
-    reg signed [17:0] acc;
+    // --- Output accumulator (2 bits of growth for 3-way sum) ---
+    reg signed [14:0] acc;
 
     // --- Control ---
     reg [3:0] filt_idx;   // 0..8
@@ -84,24 +84,24 @@ module vocoder(clk, rst_n, start, done, mic, saw, out);
     reg       busy;
 
     // Rectify (abs) of mic-BPF outputs -- feeds envelope LPF inputs
-    wire signed [15:0] rect0 = bf_y[0][15] ? -bf_y[0] : bf_y[0];
-    wire signed [15:0] rect1 = bf_y[1][15] ? -bf_y[1] : bf_y[1];
-    wire signed [15:0] rect2 = bf_y[2][15] ? -bf_y[2] : bf_y[2];
+    wire signed [12:0] rect0 = bf_y[0][12] ? -bf_y[0] : bf_y[0];
+    wire signed [12:0] rect1 = bf_y[1][12] ? -bf_y[1] : bf_y[1];
+    wire signed [12:0] rect2 = bf_y[2][12] ? -bf_y[2] : bf_y[2];
 
     // --- Coefficient ROM (combinational mux on filt_idx) ---
-    reg signed [15:0] b0_sel, b1_sel, b2_sel, a1_sel, a2_sel;
+    reg signed [12:0] b0_sel, b1_sel, b2_sel, a1_sel, a2_sel;
     always @* begin
         case (filt_idx)
             4'd0, 4'd6: begin b0_sel=B1_b0; b1_sel=B1_b1; b2_sel=B1_b2; a1_sel=B1_a1; a2_sel=B1_a2; end
             4'd1, 4'd7: begin b0_sel=B2_b0; b1_sel=B2_b1; b2_sel=B2_b2; a1_sel=B2_a1; a2_sel=B2_a2; end
             4'd2, 4'd8: begin b0_sel=B3_b0; b1_sel=B3_b1; b2_sel=B3_b2; a1_sel=B3_a1; a2_sel=B3_a2; end
-            4'd3, 4'd4, 4'd5: begin b0_sel=ENV_b0; b1_sel=16'sd0; b2_sel=16'sd0; a1_sel=ENV_a1; a2_sel=16'sd0; end
-            default: begin b0_sel=16'sd0; b1_sel=16'sd0; b2_sel=16'sd0; a1_sel=16'sd0; a2_sel=16'sd0; end
+            4'd3, 4'd4, 4'd5: begin b0_sel=ENV_b0; b1_sel=13'sd0; b2_sel=13'sd0; a1_sel=ENV_a1; a2_sel=13'sd0; end
+            default: begin b0_sel=13'sd0; b1_sel=13'sd0; b2_sel=13'sd0; a1_sel=13'sd0; a2_sel=13'sd0; end
         endcase
     end
 
     // --- Filter input mux ---
-    reg signed [15:0] in_sel;
+    reg signed [12:0] in_sel;
     always @* begin
         case (filt_idx)
             4'd0, 4'd1, 4'd2: in_sel = mic_r;
@@ -109,16 +109,16 @@ module vocoder(clk, rst_n, start, done, mic, saw, out);
             4'd4:             in_sel = rect1;
             4'd5:             in_sel = rect2;
             4'd6, 4'd7, 4'd8: in_sel = saw_r;
-            default:          in_sel = 16'sd0;
+            default:          in_sel = 13'sd0;
         endcase
     end
 
     // --- Shared multiplier ---
     // op_a/op_b vary by phase:
-    //   phase 0..2: in_sel * b0/b1/b2  (Q1.15 * Q2.14)
-    //   phase 3..4: y_r    * a1/a2     (Q1.15 * Q2.14)
-    //   phase 5  :  env_y[i-6] * sbf_y (Q1.15 * Q1.15)
-    reg signed [15:0] op_a, op_b;
+    //   phase 0..2: in_sel * b0/b1/b2  (Q1.12 * Q2.11)
+    //   phase 3..4: y_r    * a1/a2     (Q1.12 * Q2.11)
+    //   phase 5  :  env_y[i-6] * sbf_y (Q1.12 * Q1.12)
+    reg signed [12:0] op_a, op_b;
     always @* begin
         case (phase)
             3'd0: begin op_a = in_sel; op_b = b0_sel; end
@@ -131,50 +131,50 @@ module vocoder(clk, rst_n, start, done, mic, saw, out);
                     4'd6:    begin op_a = env_y[0]; op_b = sbf_y; end
                     4'd7:    begin op_a = env_y[1]; op_b = sbf_y; end
                     4'd8:    begin op_a = env_y[2]; op_b = sbf_y; end
-                    default: begin op_a = 16'sd0;   op_b = 16'sd0; end
+                    default: begin op_a = 13'sd0;   op_b = 13'sd0; end
                 endcase
             end
-            default: begin op_a = 16'sd0; op_b = 16'sd0; end
+            default: begin op_a = 13'sd0; op_b = 13'sd0; end
         endcase
     end
 
     /* verilator lint_off UNUSEDSIGNAL */
-    wire signed [31:0] prod = op_a * op_b;
+    wire signed [25:0] prod = op_a * op_b;
     /* verilator lint_on UNUSEDSIGNAL */
-    // Filter MAC: Q1.15 * Q2.14 = Q3.29 in 32 bits; take [29:14] for Q1.15
-    wire signed [15:0] prod_trunc_filt   = prod[29:14];
-    // Env*saw mult: Q1.15 * Q1.15 = Q2.30 in 32 bits; take [30:15] for Q1.15
-    wire signed [15:0] prod_trunc_envsaw = prod[30:15];
+    // Filter MAC: Q1.12 * Q2.11 = Q3.23 in 26 bits; take [23:11] for Q1.12
+    wire signed [12:0] prod_trunc_filt   = prod[23:11];
+    // Env*saw mult: Q1.12 * Q1.12 = Q2.24 in 26 bits; take [24:12] for Q1.12
+    wire signed [12:0] prod_trunc_envsaw = prod[24:12];
 
-    // Sign-extend the post-multiply product to the 18-bit accumulator width
-    wire signed [17:0] sxprod = {{2{prod_trunc_envsaw[15]}}, prod_trunc_envsaw};
+    // Sign-extend the post-multiply product to the 15-bit accumulator width
+    wire signed [14:0] sxprod = {{2{prod_trunc_envsaw[12]}}, prod_trunc_envsaw};
 
     // --- FSM ---
     integer i;
     always @(posedge clk) begin
         if (~rst_n) begin
             for (i = 0; i < 9; i = i + 1) begin
-                s1[i] <= 16'sd0;
-                s2[i] <= 16'sd0;
+                s1[i] <= 13'sd0;
+                s2[i] <= 13'sd0;
             end
             for (i = 0; i < 3; i = i + 1) begin
-                bf_y[i]  <= 16'sd0;
-                env_y[i] <= 16'sd0;
+                bf_y[i]  <= 13'sd0;
+                env_y[i] <= 13'sd0;
             end
-            sbf_y    <= 16'sd0;
-            xb0_r    <= 16'sd0;
-            xb1_r    <= 16'sd0;
-            xb2_r    <= 16'sd0;
-            ya1_r    <= 16'sd0;
-            y_r      <= 16'sd0;
-            acc      <= 18'sd0;
-            mic_r    <= 16'sd0;
-            saw_r    <= 16'sd0;
+            sbf_y    <= 13'sd0;
+            xb0_r    <= 13'sd0;
+            xb1_r    <= 13'sd0;
+            xb2_r    <= 13'sd0;
+            ya1_r    <= 13'sd0;
+            y_r      <= 13'sd0;
+            acc      <= 15'sd0;
+            mic_r    <= 13'sd0;
+            saw_r    <= 13'sd0;
             filt_idx <= 4'd0;
             phase    <= 3'd0;
             busy     <= 1'b0;
             done     <= 1'b0;
-            out      <= 16'sd0;
+            out      <= 13'sd0;
         end else begin
             done <= 1'b0;
             if (!busy) begin
@@ -184,7 +184,7 @@ module vocoder(clk, rst_n, start, done, mic, saw, out);
                     phase    <= 3'd0;
                     mic_r    <= mic;
                     saw_r    <= saw;
-                    acc      <= 18'sd0;
+                    acc      <= 15'sd0;
                 end
             end else begin
                 case (phase)
@@ -239,7 +239,7 @@ module vocoder(clk, rst_n, start, done, mic, saw, out);
                     end
                     3'd6: begin
                         // Final cycle: register output, pulse done
-                        out      <= acc[15:0];
+                        out      <= acc[12:0];
                         done     <= 1'b1;
                         busy     <= 1'b0;
                         filt_idx <= 4'd0;

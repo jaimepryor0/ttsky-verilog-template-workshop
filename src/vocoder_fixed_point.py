@@ -20,10 +20,10 @@ from filter_df2 import filter_df2_hw
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 FS        = 48_000
-ADC_BITS  = 16
-DATA_FRAC = 15      # Q1.15: audio in (-1, 1), maps to full ADC range
-COEF_BITS = 16
-COEF_FRAC = 14      # SOS biquad a[] always within (-2, 2); b[] down to ~7e-4 at Q2.14
+ADC_BITS  = 13
+DATA_FRAC = 12      # Q1.12: audio in (-1, 1), maps to full ADC range
+COEF_BITS = 13
+COEF_FRAC = 11      # SOS biquad a[] always within (-2, 2); Q2.11 keeps that headroom
 SAW_FREQ  = 500     # Hz
 
 # Voice bands: log-spaced to match vocal tract resonance structure

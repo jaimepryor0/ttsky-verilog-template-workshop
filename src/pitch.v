@@ -1,7 +1,7 @@
 `default_nettype none
 
 module pitch(clk, rst_n, en, increment, out);
-// Sawtooth NCO. Output is signed Q1.15 ramping from -1.0 to ~+1.0
+// Sawtooth NCO. Output is signed Q1.12 ramping from -1.0 to ~+1.0
 // across each period, then wrapping. Frequency = Fs * increment / 2^32
 // where Fs is the audio sample rate (i.e. the rate at which `en` pulses).
 
@@ -11,7 +11,7 @@ module pitch(clk, rst_n, en, increment, out);
     input  wire                       rst_n;
     input  wire                       en;            // 1-cycle pulse per audio sample
     input  wire        [PHASE_W-1:0]  increment;
-    output wire signed [15:0]         out;
+    output wire signed [12:0]         out;
 
     reg [PHASE_W-1:0] phase;
 
@@ -25,8 +25,8 @@ module pitch(clk, rst_n, en, increment, out);
             phase <= phase + increment;
     end
 
-    // Top 16 bits of the phase accumulator, reinterpreted as a signed Q1.15
+    // Top 13 bits of the phase accumulator, reinterpreted as a signed Q1.12
     // value, give a bipolar sawtooth.
-    assign out = $signed(phase[PHASE_W-1 : PHASE_W-16]);
+    assign out = $signed(phase[PHASE_W-1 : PHASE_W-13]);
 
 endmodule

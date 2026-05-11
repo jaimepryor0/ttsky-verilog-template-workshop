@@ -7,33 +7,33 @@
 module tb_vocoder ();
 
     // ── Coefficient parameters (Q2.14 signed, defaults to 0) ────────────
-    parameter signed [15:0] B1_b0 = 16'sd0;
-    parameter signed [15:0] B1_b1 = 16'sd0;
-    parameter signed [15:0] B1_b2 = 16'sd0;
-    parameter signed [15:0] B1_a1 = 16'sd0;
-    parameter signed [15:0] B1_a2 = 16'sd0;
+    parameter signed [12:0] B1_b0 = 13'sd0;
+    parameter signed [12:0] B1_b1 = 13'sd0;
+    parameter signed [12:0] B1_b2 = 13'sd0;
+    parameter signed [12:0] B1_a1 = 13'sd0;
+    parameter signed [12:0] B1_a2 = 13'sd0;
 
-    parameter signed [15:0] B2_b0 = 16'sd0;
-    parameter signed [15:0] B2_b1 = 16'sd0;
-    parameter signed [15:0] B2_b2 = 16'sd0;
-    parameter signed [15:0] B2_a1 = 16'sd0;
-    parameter signed [15:0] B2_a2 = 16'sd0;
+    parameter signed [12:0] B2_b0 = 13'sd0;
+    parameter signed [12:0] B2_b1 = 13'sd0;
+    parameter signed [12:0] B2_b2 = 13'sd0;
+    parameter signed [12:0] B2_a1 = 13'sd0;
+    parameter signed [12:0] B2_a2 = 13'sd0;
 
-    parameter signed [15:0] B3_b0 = 16'sd0;
-    parameter signed [15:0] B3_b1 = 16'sd0;
-    parameter signed [15:0] B3_b2 = 16'sd0;
-    parameter signed [15:0] B3_a1 = 16'sd0;
-    parameter signed [15:0] B3_a2 = 16'sd0;
+    parameter signed [12:0] B3_b0 = 13'sd0;
+    parameter signed [12:0] B3_b1 = 13'sd0;
+    parameter signed [12:0] B3_b2 = 13'sd0;
+    parameter signed [12:0] B3_a1 = 13'sd0;
+    parameter signed [12:0] B3_a2 = 13'sd0;
 
-    parameter signed [15:0] ENV_b0 = 16'sd0;
-    parameter signed [15:0] ENV_a1 = 16'sd0;
+    parameter signed [12:0] ENV_b0 = 13'sd0;
+    parameter signed [12:0] ENV_a1 = 13'sd0;
 
     // ── DUT-facing nets (driven by cocotb) ─────────────────────────────
     reg                clk   = 1'b0;
     reg                rst_n = 1'b0;
-    reg  signed [15:0] mic   = 16'sd0;
-    reg  signed [15:0] saw   = 16'sd0;
-    wire signed [15:0] out;
+    reg  signed [12:0] mic   = 13'sd0;
+    reg  signed [12:0] saw   = 13'sd0;
+    wire signed [12:0] out;
 
     // Vocoder uses a start/done handshake: pulse `start` for one cycle
     // with the desired mic/saw, then wait for `done` to sample `out`.
