@@ -12,17 +12,24 @@ module vocoder(clk, rst_n, start, done, mic, saw, out);
 // 8-bit signed throughout: Q1.7 data, Q2.6 coefficients.
 //
 // Shared serial multiplier: one signed shift-and-add unit handles every
-// multiplication in the vocoder (the 4 MACs per biquad x 9 biquads, plus
-// the 3 env*saw post-multiplies). The b1 phase is omitted because every
-// b1 coefficient in this design's Butterworth bandpass / single-pole
-// envelope chain is exactly zero -- the saving is one whole multiply
-// cycle (9 chip clocks) per biquad. If anyone changes VOICE_BANDS to a
-// design with a non-zero b1, the bit-exact Python comparison in
-// test_vocoder.py will catch it.
+// multiplication in the vocoder. The phase layout exploits two structural
+// zeros in the coefficient set:
+//
+//   * b1 is zero for every biquad -- holds because the Butterworth
+//     bandpass at FS=48k quantises b1 to 0, and the envelope LPF is
+//     single-pole. The b1 multiply phase is therefore omitted across the
+//     whole pipeline. test_vocoder._design_parameters() refuses to build
+//     if a future band design produces a non-zero b1.
+//
+//   * b2 and a2 are zero for the envelope LPFs (filt_idx 3..5) by
+//     topology -- a one-pole IIR has no second-order taps. The b2*x and
+//     a2*y phases are skipped for those three slots, so each envelope
+//     biquad runs only 2 multiplies (b0*x, a1*y) instead of 4. s2[3..5]
+//     is never written and gets pruned by synthesis.
 //
 // Each multiply takes 1 setup cycle + 8 iteration cycles = 9 chip clocks.
 // Total per audio sample:
-//   (6 BF/ENV * 4 phases + 3 SBF * 5 phases) * 9 + 1 = 352 cycles.
+//   (3 BPF * 4 phases + 3 ENV * 2 phases + 3 SBF * 5 phases) * 9 + 1 = 298 cycles.
 //
 // Interface:
 //   start - 1-cycle pulse to begin processing one sample using the current
@@ -69,9 +76,14 @@ module vocoder(clk, rst_n, start, done, mic, saw, out);
     // --- Latched inputs (captured when start is sampled high) ---
     reg signed [7:0] mic_r, saw_r;
 
-    // --- State RAM: 9 biquads x 2 regs ---
+    // --- State RAM ---
+    // s1 has one entry per biquad slot, including the envelope filters
+    // (which use s1 normally). s2 is only used by the second-order biquads
+    // (3 BPFs + 3 SBFs = 6 slots) -- the envelope filters are one-pole so
+    // their s2 would be permanently zero. We index s2 with a compressed
+    // address (`s2_addr`, below) instead of the full 9-entry filt_idx.
     reg signed [7:0] s1 [0:8];
-    reg signed [7:0] s2 [0:8];
+    reg signed [7:0] s2 [0:5];
 
     // --- Shared per-band output slot --------------------------------------
     // For band i, slot[i] holds:
@@ -121,6 +133,16 @@ module vocoder(clk, rst_n, start, done, mic, saw, out);
     wire signed [7:0] rect1 = slot[1][7] ? -slot[1] : slot[1];
     wire signed [7:0] rect2 = slot[2][7] ? -slot[2] : slot[2];
 
+    // True while we're processing one of the envelope LPF slots.
+    wire is_env = (filt_idx >= 4'd3) && (filt_idx <= 4'd5);
+
+    // Compress filt_idx {0,1,2,6,7,8} -> s2 address {0,1,2,3,4,5}. The
+    // envelope filters (filt_idx 3..5) never touch s2, so we don't care
+    // what this evaluates to for them. filt_idx=8 wraps in the 3-bit
+    // subtract: 000 - 011 = 101 = 5, exactly what we want.
+    wire [2:0] s2_addr = (filt_idx >= 4'd6) ? (filt_idx[2:0] - 3'd3)
+                                            :  filt_idx[2:0];
+
     // --- Coefficient ROM (combinational mux on filt_idx) ---
     reg signed [7:0] b0_sel, b2_sel, a1_sel, a2_sel;
     always @* begin
@@ -148,9 +170,9 @@ module vocoder(clk, rst_n, start, done, mic, saw, out);
 
     // --- Operand selection per phase ---
     //   phase 0  : in_sel * b0          (Q1.7 * Q2.6) -- also folds in `+ s1`
-    //   phase 1  : in_sel * b2          (Q1.7 * Q2.6)
+    //   phase 1  : in_sel * b2          (Q1.7 * Q2.6) -- skipped for env
     //   phase 2  : y_r    * a1          (Q1.7 * Q2.6) -- s1 updated this cycle
-    //   phase 3  : y_r    * a2          (Q1.7 * Q2.6) -- s2 updated, ends biquad
+    //   phase 3  : y_r    * a2          (Q1.7 * Q2.6) -- s2 updated; skipped for env
     //   phase 4  : slot[i-6] * y_r      (Q1.7 * Q1.7) -- SBF post-mul; y_r
     //                                                     still holds the saw
     //                                                     BPF output from phase 3
@@ -275,48 +297,77 @@ module vocoder(clk, rst_n, start, done, mic, saw, out);
                         end
                     end else begin
                         // MAC phase 0..3 -- capture product and update state.
+                        // Envelope filters (is_env) skip phases 1 and 3:
+                        // b2 and a2 are zero by topology for a one-pole IIR,
+                        // so the matching multiplies and the s2 update would
+                        // produce nothing. The slot[] capture that BPFs do
+                        // at phase 3 happens at phase 2 instead for env.
                         case (mac_phase)
                             // Phase 0 (b0*x): fold the trailing `+ s1` into
                             // the same cycle so the b0 product never needs
                             // its own holding register. (b1 phase is omitted
                             // entirely -- b1 is zero in this design.)
                             3'd0: y_r   <= prod_trunc_filt + s1[filt_idx];
+                            // Phase 1 (b2*x): reachable only for BPF / SBF.
                             3'd1: xb2_r <= prod_trunc_filt;
-                            // Phase 2 (a1*y): write the new s1 *now* using
-                            // the fresh a1 product; saves the ya1_r reg.
-                            // s1_new = s2_old - ya1 (b1 = 0 in this design).
-                            3'd2: s1[filt_idx] <= s2[filt_idx] - prod_trunc_filt;
+                            // Phase 2 (a1*y): write the new s1 immediately
+                            // with the fresh a1 product. For env, s2 is
+                            // permanently 0 so we don't read it -- and we
+                            // also capture y_r into slot[] now since the
+                            // env biquad ends here.
+                            3'd2: begin
+                                if (is_env) begin
+                                    s1[filt_idx] <= -prod_trunc_filt;
+                                    case (filt_idx)
+                                        4'd3:    slot[0] <= y_r;
+                                        4'd4:    slot[1] <= y_r;
+                                        4'd5:    slot[2] <= y_r;
+                                        default: ;
+                                    endcase
+                                end else begin
+                                    s1[filt_idx] <= s2[s2_addr] - prod_trunc_filt;
+                                end
+                            end
+                            // Phase 3 (a2*y + s2 write): reachable only for
+                            // BPF (filt_idx 0..2) or SBF (filt_idx 6..8).
                             3'd3: begin
-                                // ya2 == prod_trunc_filt this cycle.
-                                s2[filt_idx] <= xb2_r - prod_trunc_filt;
-                                // Per-biquad output capture into the shared
-                                // slot[]. Saw-BPF results (filt_idx 6..8)
-                                // don't need a slot at all -- y_r itself is
-                                // the post-mul operand next cycle.
+                                s2[s2_addr] <= xb2_r - prod_trunc_filt;
                                 case (filt_idx)
                                     4'd0:    slot[0] <= y_r;
                                     4'd1:    slot[1] <= y_r;
                                     4'd2:    slot[2] <= y_r;
-                                    4'd3:    slot[0] <= y_r;
-                                    4'd4:    slot[1] <= y_r;
-                                    4'd5:    slot[2] <= y_r;
+                                    // SBF (6..8): y_r goes straight into
+                                    // the post-mul; no slot capture.
                                     default: ;
                                 endcase
                             end
                             default: ;
                         endcase
 
-                        if (mac_phase < 3'd3) begin
-                            mac_phase <= mac_phase + 3'd1;
-                        end else begin
-                            // mac_phase == 3: end of biquad
-                            if (filt_idx >= 4'd6) begin
-                                mac_phase <= 3'd4;  // SBF needs post-mul
-                            end else begin
-                                filt_idx  <= filt_idx + 4'd1;
-                                mac_phase <= 3'd0;
+                        // Phase transition:
+                        //   BPF / SBF : 0 -> 1 -> 2 -> 3 -> {next | post-mul}
+                        //   ENV       : 0 -> 2 -> next biquad (skip 1 and 3)
+                        case (mac_phase)
+                            3'd0:    mac_phase <= is_env ? 3'd2 : 3'd1;
+                            3'd1:    mac_phase <= 3'd2;
+                            3'd2: begin
+                                if (is_env) begin
+                                    filt_idx  <= filt_idx + 4'd1;
+                                    mac_phase <= 3'd0;
+                                end else begin
+                                    mac_phase <= 3'd3;
+                                end
                             end
-                        end
+                            3'd3: begin
+                                if (filt_idx >= 4'd6) begin
+                                    mac_phase <= 3'd4;  // SBF needs post-mul
+                                end else begin
+                                    filt_idx  <= filt_idx + 4'd1;
+                                    mac_phase <= 3'd0;
+                                end
+                            end
+                            default: ;
+                        endcase
                     end
                     end
             end
