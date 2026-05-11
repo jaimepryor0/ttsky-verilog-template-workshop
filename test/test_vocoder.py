@@ -1,14 +1,19 @@
 """
-Cocotb test: drive the vocoder RTL one sample per clock and assert
-every output sample matches vocoder_fixed_point.py exactly.
+Cocotb test: drive the vocoder RTL one sample at a time and assert every
+output sample matches vocoder_fixed_point.py exactly.
 
 This module is both:
   - the @cocotb.test() target loaded inside the simulator
   - the runner script that builds + launches the simulation
     (run `python test_vocoder.py` from this directory, or via pytest)
 
+The vocoder uses a shared 16x16 multiplier sequenced over 9 internal
+biquads, so each sample takes ~49 chip clocks. Drive `start` for one
+cycle with the desired mic/saw inputs, then wait for `done` to sample
+`out`.
+
 Coefficient parameters are computed in Python at build time and
-passed straight to the toplevel via cocotb_tools.runner — no
+passed straight to the toplevel via cocotb_tools.runner -- no
 generated `include files.
 """
 import os
@@ -26,10 +31,15 @@ import vocoder_fixed_point as vfp  # noqa: E402
 from hw_int import hw_int  # noqa: E402
 
 
-# ── Coefficient design (shared by runner and Python reference) ──────────────
+# -- Coefficient design (shared by runner and Python reference) -------------
 
 def _design_parameters() -> dict[str, int]:
-    """Compute all 17 Q2.14 coefficient ints to pass as toplevel parameters."""
+    """Compute all 14 Q2.14 coefficient ints to pass as toplevel parameters.
+
+    The vocoder hardware skips the b1 multiply phase, so we assert here that
+    every band's b1 coefficient rounds to zero. If a future VOICE_BANDS edit
+    produces a non-zero b1, this raises rather than silently diverging from
+    the Python reference."""
     params: dict[str, int] = {}
     for band_idx, (flo, fhi) in enumerate(vfp.VOICE_BANDS, start=1):
         sections = vfp._design_bandpass(flo, fhi)
@@ -39,8 +49,13 @@ def _design_parameters() -> dict[str, int]:
                 "models a single biquad per band. Set FILTER_ORDER = 1."
             )
         b_hw, a_hw = sections[0]
+        if int(b_hw.val[1]) != 0:
+            raise RuntimeError(
+                f"Band {band_idx}: b1 = {int(b_hw.val[1])}, but vocoder.v omits "
+                "the b1 multiply phase. Restore phase 1 in vocoder.v or pick "
+                "band edges that quantise b1 to zero."
+            )
         params[f"B{band_idx}_b0"] = int(b_hw.val[0])
-        params[f"B{band_idx}_b1"] = int(b_hw.val[1])
         params[f"B{band_idx}_b2"] = int(b_hw.val[2])
         params[f"B{band_idx}_a1"] = int(a_hw.val[1])
         params[f"B{band_idx}_a2"] = int(a_hw.val[2])
@@ -51,14 +66,14 @@ def _design_parameters() -> dict[str, int]:
     return params
 
 
-# ── Cocotb test (runs inside the simulator) ─────────────────────────────────
+# -- Cocotb test (runs inside the simulator) --------------------------------
 
 import cocotb  # noqa: E402
 from cocotb.clock import Clock  # noqa: E402
 from cocotb.triggers import ClockCycles, FallingEdge, RisingEdge, Timer  # noqa: E402
 
 
-CLOCK_PERIOD_NS = 100   # one clock = one audio sample
+CLOCK_PERIOD_NS = 100
 WINDOW_MS       = 100   # length of audio slice we run through the DUT
 AUDIO_PATH      = os.path.join(_SRC, 'hello.wav')
 
@@ -75,36 +90,47 @@ def _build_test_signal(audio_path: str = AUDIO_PATH,
     return full[start:start + n]
 
 
-@cocotb.test()
-async def vocoder_matches_python(dut):
-    cocotb.start_soon(Clock(dut.clk, CLOCK_PERIOD_NS, unit="ns").start())
-
-    # Reset
+async def _reset(dut):
     dut.rst_n.value = 0
     dut.mic.value   = 0
     dut.saw.value   = 0
+    dut.start.value = 0
     await ClockCycles(dut.clk, 5)
     dut.rst_n.value = 1
     await FallingEdge(dut.clk)
 
-    # Stimulus + reference
-    audio_hw   = _build_test_signal()
-    n_samples  = len(audio_hw)
-    saw_hw     = vfp._generate_sawtooth(n_samples)
-    expected   = vfp.process(audio_hw, saw_hw)
+
+async def _process_one_sample(dut, mic_val: int, saw_val: int) -> int:
+    """Drive one sample through the start/done handshake and return out."""
+    dut.mic.value   = int(mic_val)
+    dut.saw.value   = int(saw_val)
+    dut.start.value = 1
+    await RisingEdge(dut.clk)
+    dut.start.value = 0
+    await RisingEdge(dut.done)
+    # `done` and `out` commit on the same edge; out is already valid here.
+    return dut.out.value.to_signed()
+
+
+@cocotb.test()
+async def vocoder_matches_python(dut):
+    cocotb.start_soon(Clock(dut.clk, CLOCK_PERIOD_NS, unit="ns").start())
+    await _reset(dut)
+
+    audio_hw  = _build_test_signal()
+    n_samples = len(audio_hw)
+    saw_hw    = vfp._generate_sawtooth(n_samples)
+    expected  = vfp.process(audio_hw, saw_hw)
 
     audio_int = audio_hw.val.astype(np.int64)
     saw_int   = saw_hw.val.astype(np.int64)
     exp_int   = expected.val.astype(np.int64)
 
-    # Drive one sample per clock
     y_dut = np.zeros(n_samples, dtype=np.int64)
     for n in range(n_samples):
-        await FallingEdge(dut.clk)
-        dut.mic.value = int(audio_int[n])
-        dut.saw.value = int(saw_int[n])
-        await Timer(1, unit="ns")  # let combinational settle
-        y_dut[n] = dut.out.value.to_signed()
+        y_dut[n] = await _process_one_sample(dut,
+                                             int(audio_int[n]),
+                                             int(saw_int[n]))
 
     diff = y_dut - exp_int
     bad  = np.flatnonzero(diff)
@@ -123,23 +149,15 @@ async def vocoder_matches_python(dut):
 
 
 @cocotb.test()
-async def vocoder_matches_python_with_random_en(dut):
-    """Same comparison but with random idle cycles between sample-advancing
-    `en` pulses. Verifies the clock-enable plumbing keeps state in sync no
-    matter how many chip cycles separate audio samples."""
+async def vocoder_matches_python_with_idle_gaps(dut):
+    """Same comparison but with random idle cycles between start pulses,
+    to verify the FSM correctly idles waiting for the next sample.
+    """
     import random
     random.seed(0xCAFE)
 
     cocotb.start_soon(Clock(dut.clk, CLOCK_PERIOD_NS, unit="ns").start())
-
-    # Reset
-    dut.rst_n.value = 0
-    dut.mic.value   = 0
-    dut.saw.value   = 0
-    dut.en.value    = 0
-    await ClockCycles(dut.clk, 5)
-    dut.rst_n.value = 1
-    await FallingEdge(dut.clk)
+    await _reset(dut)
 
     audio_hw  = _build_test_signal()
     n_samples = len(audio_hw)
@@ -152,23 +170,13 @@ async def vocoder_matches_python_with_random_en(dut):
 
     y_dut = np.zeros(n_samples, dtype=np.int64)
     for n in range(n_samples):
-        # Drive the new sample, hold en low so idle posedges don't advance state
-        dut.mic.value = int(audio_int[n])
-        dut.saw.value = int(saw_int[n])
-        dut.en.value  = 0
-
-        for _ in range(random.randint(0, 4)):
-            await ClockCycles(dut.clk, 1)  # back to next falling edge, en=0 throughout
-
-        # Combinational `out` reflects (mic[n], saw[n], state_n) = y[n]
-        await Timer(1, unit="ns")
-        y_dut[n] = dut.out.value.to_signed()
-
-        # Pulse en for exactly one rising edge to advance state
-        dut.en.value = 1
-        await RisingEdge(dut.clk)
-        dut.en.value = 0
-        await FallingEdge(dut.clk)
+        # Idle for a random number of cycles with start held low
+        gap = random.randint(0, 4)
+        if gap:
+            await ClockCycles(dut.clk, gap)
+        y_dut[n] = await _process_one_sample(dut,
+                                             int(audio_int[n]),
+                                             int(saw_int[n]))
 
     diff = y_dut - exp_int
     bad  = np.flatnonzero(diff)
@@ -179,14 +187,14 @@ async def vocoder_matches_python_with_random_en(dut):
             for i in head
         )
         raise AssertionError(
-            f"DUT (random-en) differs from Python reference at {bad.size}/{n_samples} "
+            f"DUT (idle-gap) differs from Python reference at {bad.size}/{n_samples} "
             f"samples (first {len(head)} shown):\n{details}"
         )
 
-    dut._log.info(f"All {n_samples} samples match with random `en` gating.")
+    dut._log.info(f"All {n_samples} samples match with idle gaps between starts.")
 
 
-# ── Runner entry point (runs outside the simulator) ─────────────────────────
+# -- Runner entry point (runs outside the simulator) ------------------------
 
 def main() -> None:
     from cocotb_tools.runner import get_runner
@@ -196,7 +204,6 @@ def main() -> None:
 
     runner.build(
         sources=[
-            os.path.join(_SRC,  'filter.v'),
             os.path.join(_SRC,  'vocoder.v'),
             os.path.join(_HERE, 'tb_vocoder.v'),
         ],

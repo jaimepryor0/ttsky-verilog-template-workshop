@@ -17,42 +17,40 @@ project:
   # List your project's source files here. Source files must be in ./src and you must list each source file separately, one per line:
   source_files:
     - "project.v"
-    - "spi_master.v"
     - "vocoder.v"
-    - "filter.v"
     - "pitch.v"
 
 # The pinout of your project. Leave unused pins blank. DO NOT delete or add any pins.
 pinout:
-  # Inputs - dedicated pitch byte (top 8 bits of the 32-bit NCO phase increment)
-  ui[0]: "pitch[0]"
-  ui[1]: "pitch[1]"
-  ui[2]: "pitch[2]"
-  ui[3]: "pitch[3]"
-  ui[4]: "pitch[4]"
-  ui[5]: "pitch[5]"
-  ui[6]: "pitch[6]"
-  ui[7]: "pitch[7]"
+  # Inputs - 7-bit Q1.6 audio sample + 1-bit valid (rising-edge triggered).
+  ui[0]: "audio_in[0]"
+  ui[1]: "audio_in[1]"
+  ui[2]: "audio_in[2]"
+  ui[3]: "audio_in[3]"
+  ui[4]: "audio_in[4]"
+  ui[5]: "audio_in[5]"
+  ui[6]: "audio_in[6]"
+  ui[7]: "audio_in_valid"
 
-  # Outputs - SPI/FSM debug taps plus a 1-bit sigma-delta audio for the audio Pmod
-  uo[0]: "dbg_sck"
-  uo[1]: "dbg_cs_n"
-  uo[2]: "dbg_spi_done"
-  uo[3]: "dbg_target_dac"
-  uo[4]: "dbg_state[0]"
-  uo[5]: "dbg_state[1]"
-  uo[6]: "dbg_state[2]"
-  uo[7]: "pwm_audio"
+  # Outputs - 7-bit Q1.6 audio sample + 1-bit valid (1-clk pulse).
+  uo[0]: "audio_out[0]"
+  uo[1]: "audio_out[1]"
+  uo[2]: "audio_out[2]"
+  uo[3]: "audio_out[3]"
+  uo[4]: "audio_out[4]"
+  uo[5]: "audio_out[5]"
+  uo[6]: "audio_out[6]"
+  uo[7]: "audio_out_valid"
 
-  # Bidirectional pins - shared SPI bus to MCP3201 ADC + MCP4921 DAC
-  uio[0]: "adc_cs_n"
-  uio[1]: "spi_mosi"
-  uio[2]: "spi_miso"
-  uio[3]: "spi_sck"
-  uio[4]: "dac_cs_n"
-  uio[5]: ""
-  uio[6]: ""
-  uio[7]: ""
+  # Bidirectional pins - all inputs; carry the 8-bit pitch byte.
+  uio[0]: "pitch[0]"
+  uio[1]: "pitch[1]"
+  uio[2]: "pitch[2]"
+  uio[3]: "pitch[3]"
+  uio[4]: "pitch[4]"
+  uio[5]: "pitch[5]"
+  uio[6]: "pitch[6]"
+  uio[7]: "pitch[7]"
 
 # Do not change!
 yaml_version: 6

@@ -7,39 +7,33 @@
 module tb_vocoder ();
 
     // ── Coefficient parameters (Q2.14 signed, defaults to 0) ────────────
-    parameter signed [15:0] B1_b0 = 16'sd0;
-    parameter signed [15:0] B1_b1 = 16'sd0;
-    parameter signed [15:0] B1_b2 = 16'sd0;
-    parameter signed [15:0] B1_a1 = 16'sd0;
-    parameter signed [15:0] B1_a2 = 16'sd0;
+    // b1 is omitted because the vocoder hardware skips the b1 multiply
+    // phase entirely. The Python reference will fail if a future band
+    // design rounds b1 to anything but zero.
+    parameter signed [7:0] B1_b0 = 8'sd0;
+    parameter signed [7:0] B1_b2 = 8'sd0;
+    parameter signed [7:0] B1_a1 = 8'sd0;
+    parameter signed [7:0] B1_a2 = 8'sd0;
 
-    parameter signed [15:0] B2_b0 = 16'sd0;
-    parameter signed [15:0] B2_b1 = 16'sd0;
-    parameter signed [15:0] B2_b2 = 16'sd0;
-    parameter signed [15:0] B2_a1 = 16'sd0;
-    parameter signed [15:0] B2_a2 = 16'sd0;
+    parameter signed [7:0] B2_b0 = 8'sd0;
+    parameter signed [7:0] B2_b2 = 8'sd0;
+    parameter signed [7:0] B2_a1 = 8'sd0;
+    parameter signed [7:0] B2_a2 = 8'sd0;
 
-    parameter signed [15:0] B3_b0 = 16'sd0;
-    parameter signed [15:0] B3_b1 = 16'sd0;
-    parameter signed [15:0] B3_b2 = 16'sd0;
-    parameter signed [15:0] B3_a1 = 16'sd0;
-    parameter signed [15:0] B3_a2 = 16'sd0;
-
-    parameter signed [15:0] ENV_b0 = 16'sd0;
-    parameter signed [15:0] ENV_a1 = 16'sd0;
+    parameter signed [7:0] ENV_b0 = 8'sd0;
+    parameter signed [7:0] ENV_a1 = 8'sd0;
 
     // ── DUT-facing nets (driven by cocotb) ─────────────────────────────
-    reg                clk = 1'b0;
-    reg                rst_n = 1'b0;
-    reg  signed [15:0] mic = 16'sd0;
-    reg  signed [15:0] saw = 16'sd0;
-    wire signed [15:0] out;
+    reg               clk   = 1'b0;
+    reg               rst_n = 1'b0;
+    reg  signed [7:0] mic   = 8'sd0;
+    reg  signed [7:0] saw   = 8'sd0;
+    wire signed [7:0] out;
 
-    // The chip-level integration only pulses `en` at audio-sample rate, but
-    // cocotb can drive this directly to test both:
-    //   - en tied high (one sample per clock)
-    //   - random-gated en (idle cycles between sample-advancing pulses)
-    reg en = 1'b1;
+    // Vocoder uses a start/done handshake: pulse `start` for one cycle
+    // with the desired mic/saw, then wait for `done` to sample `out`.
+    reg  start = 1'b0;
+    wire done;
 
 `ifndef VERILATOR
     initial begin
@@ -49,17 +43,16 @@ module tb_vocoder ();
 `endif
 
     vocoder #(
-        .B1_b0(B1_b0), .B1_b1(B1_b1), .B1_b2(B1_b2),
+        .B1_b0(B1_b0), .B1_b2(B1_b2),
         .B1_a1(B1_a1), .B1_a2(B1_a2),
-        .B2_b0(B2_b0), .B2_b1(B2_b1), .B2_b2(B2_b2),
+        .B2_b0(B2_b0), .B2_b2(B2_b2),
         .B2_a1(B2_a1), .B2_a2(B2_a2),
-        .B3_b0(B3_b0), .B3_b1(B3_b1), .B3_b2(B3_b2),
-        .B3_a1(B3_a1), .B3_a2(B3_a2),
         .ENV_b0(ENV_b0), .ENV_a1(ENV_a1)
     ) dut (
         .clk  (clk),
         .rst_n(rst_n),
-        .en   (en),
+        .start(start),
+        .done (done),
         .mic  (mic),
         .saw  (saw),
         .out  (out)

@@ -20,10 +20,10 @@ from filter_df2 import filter_df2_hw
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 FS        = 48_000
-ADC_BITS  = 16
-DATA_FRAC = 15      # Q1.15: audio in (-1, 1), maps to full ADC range
-COEF_BITS = 16
-COEF_FRAC = 14      # SOS biquad a[] always within (-2, 2); b[] down to ~7e-4 at Q2.14
+ADC_BITS  = 8
+DATA_FRAC = 7       # Q1.7: audio in (-1, 1), 12-bit ADC truncated to top 8 bits
+COEF_BITS = 8
+COEF_FRAC = 6       # Q2.6: keeps SOS biquot a[] within (-2, 2); coarse but stable
 SAW_FREQ  = 500     # Hz
 
 # Voice bands: log-spaced to match vocal tract resonance structure
@@ -31,16 +31,18 @@ SAW_FREQ  = 500     # Hz
 #   Band 2: core vowel formant region        500 – 2000 Hz
 #   Band 3: fricatives, sibilance, upper F3 2000 – 6000 Hz
 VOICE_BANDS = [
-    (200,   1000), #TODO
-    (500,  2000),
-    (2000, 6000),
+    (200,   1000),  # fundamentals + lower formants
+    (500,  2000),   # core vowel formant region
 ]
 
 FILTER_ORDER = 1    # Butterworth order; bandpass transform doubles it → 1 SOS section
 
-# Envelope LP smoother: ~20 Hz cutoff, one-pole IIR
-ENV_FC    = 20.0
-ENV_ALPHA = float(np.exp(-2.0 * np.pi * ENV_FC / FS))  # ≈ 0.9974
+# Envelope LP smoother: ~100 Hz cutoff. At Q2.6 the original 20 Hz cutoff
+# would quantise b0 = (1 - alpha) to literal 0 -- filter dies. 100 Hz gives
+# b0=1, a1=-63 at Q2.6 (effective cutoff ~120 Hz). Faster envelope tracking
+# than before, but still well below voice band-limit.
+ENV_FC    = 100.0
+ENV_ALPHA = float(np.exp(-2.0 * np.pi * ENV_FC / FS))
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -143,9 +145,15 @@ def process(audio_hw: hw_int,
         _dump(product,  f'05_product_band{i}_{flo}-{fhi}Hz')
         products.append(product)
 
-    # Each __add__ adds one guard bit; final truncate back to Q1.15
-    # matches the wide-add + slice in vocoder.v's adder.
-    acc = (products[0] + products[1] + products[2]).truncate(ADC_BITS, DATA_FRAC)
+    # Saturating accumulation of the per-band env*saw products: matches
+    # vocoder.v's 9-bit add + clamp-to-Q1.7 in the SBF post-mul phase.
+    # hw_int.__add__ does modular wrap; we do the clip outside.
+    sat_max =  2**(ADC_BITS - 1) - 1
+    sat_min = -2**(ADC_BITS - 1)
+    acc_val = products[0].val.astype(np.int64).copy()
+    for p in products[1:]:
+        acc_val = np.clip(acc_val + p.val.astype(np.int64), sat_min, sat_max)
+    acc = hw_int(acc_val, bits=ADC_BITS, frac_bits=DATA_FRAC)
     _dump(acc, '06_output')
     return acc
 
