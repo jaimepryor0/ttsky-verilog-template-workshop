@@ -1,10 +1,10 @@
 
 # Tiny Tapeout project information
 project:
-  title:        "VGA_YAY"      # Project title
+  title:        "3-band Channel Vocoder"      # Project title
   author:       "JAIME PRYOR & LEWIS WATTS"      # Your name
   discord:      "squishyfishy7532"      # Your discord username, for communication and automatically assigning you a Tapeout role (optional)
-  description:  "Checkered pattern bouncing back and forth"      # One line description of what your project does
+  description:  "16-bit Q1.15 channel vocoder with three Butterworth band-pass filters, single-pole envelope LPFs, internal sawtooth NCO, and SPI ADC/DAC interfaces (MCP3201 / MCP4921)."      # One line description of what your project does
   language:     "Verilog" # other examples include SystemVerilog, Amaranth, VHDL, etc
   clock_hz:     25175000       # Clock frequency in Hz (or 0 if not applicable)
 
@@ -13,40 +13,43 @@ project:
 
   # Your top module name must start with "tt_um_". Make it unique by including your github username:
   top_module:  "tt_um_JAIMEPRYOR0_VGA_YAY"
-  
+
   # List your project's source files here. Source files must be in ./src and you must list each source file separately, one per line:
   source_files:
     - "project.v"
-    - "hvsync_generator.v"
+    - "spi_master.v"
+    - "vocoder.v"
+    - "filter.v"
+    - "pitch.v"
 
 # The pinout of your project. Leave unused pins blank. DO NOT delete or add any pins.
 pinout:
-  # Inputs
-  ui[0]: ""
-  ui[1]: ""
-  ui[2]: ""
-  ui[3]: ""
-  ui[4]: ""
-  ui[5]: ""
-  ui[6]: ""
-  ui[7]: ""
+  # Inputs - dedicated pitch byte (top 8 bits of the 32-bit NCO phase increment)
+  ui[0]: "pitch[0]"
+  ui[1]: "pitch[1]"
+  ui[2]: "pitch[2]"
+  ui[3]: "pitch[3]"
+  ui[4]: "pitch[4]"
+  ui[5]: "pitch[5]"
+  ui[6]: "pitch[6]"
+  ui[7]: "pitch[7]"
 
-  # Outputs
-  uo[0]: "R1"
-  uo[1]: "G1"
-  uo[2]: "B1"
-  uo[3]: "VSync"
-  uo[4]: "R0"
-  uo[5]: "G0"
-  uo[6]: "B0"
-  uo[7]: "HSync"
+  # Outputs - SPI/FSM debug taps plus a 1-bit sigma-delta audio for the audio Pmod
+  uo[0]: "dbg_sck"
+  uo[1]: "dbg_cs_n"
+  uo[2]: "dbg_spi_done"
+  uo[3]: "dbg_target_dac"
+  uo[4]: "dbg_state[0]"
+  uo[5]: "dbg_state[1]"
+  uo[6]: "dbg_state[2]"
+  uo[7]: "pwm_audio"
 
-  # Bidirectional pins
-  uio[0]: ""
-  uio[1]: ""
-  uio[2]: ""
-  uio[3]: ""
-  uio[4]: ""
+  # Bidirectional pins - shared SPI bus to MCP3201 ADC + MCP4921 DAC
+  uio[0]: "adc_cs_n"
+  uio[1]: "spi_mosi"
+  uio[2]: "spi_miso"
+  uio[3]: "spi_sck"
+  uio[4]: "dac_cs_n"
   uio[5]: ""
   uio[6]: ""
   uio[7]: ""
