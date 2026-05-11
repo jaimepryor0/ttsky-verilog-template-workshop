@@ -31,9 +31,8 @@ SAW_FREQ  = 500     # Hz
 #   Band 2: core vowel formant region        500 – 2000 Hz
 #   Band 3: fricatives, sibilance, upper F3 2000 – 6000 Hz
 VOICE_BANDS = [
-    (200,   1000), #TODO
-    (500,  2000),
-    (2000, 6000),
+    (200,   1000),  # fundamentals + lower formants
+    (500,  2000),   # core vowel formant region
 ]
 
 FILTER_ORDER = 1    # Butterworth order; bandpass transform doubles it → 1 SOS section
@@ -146,9 +145,12 @@ def process(audio_hw: hw_int,
         _dump(product,  f'05_product_band{i}_{flo}-{fhi}Hz')
         products.append(product)
 
-    # Each __add__ adds one guard bit; final truncate back to Q1.15
-    # matches the wide-add + slice in vocoder.v's adder.
-    acc = (products[0] + products[1] + products[2]).truncate(ADC_BITS, DATA_FRAC)
+    # Sum the per-band env*saw products and truncate back to the data
+    # format -- matches vocoder.v's modular accumulation into `out`.
+    acc = products[0]
+    for p in products[1:]:
+        acc = acc + p
+    acc = acc.truncate(ADC_BITS, DATA_FRAC)
     _dump(acc, '06_output')
     return acc
 

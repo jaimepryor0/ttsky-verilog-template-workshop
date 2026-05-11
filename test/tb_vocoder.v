@@ -20,11 +20,6 @@ module tb_vocoder ();
     parameter signed [7:0] B2_a1 = 8'sd0;
     parameter signed [7:0] B2_a2 = 8'sd0;
 
-    parameter signed [7:0] B3_b0 = 8'sd0;
-    parameter signed [7:0] B3_b2 = 8'sd0;
-    parameter signed [7:0] B3_a1 = 8'sd0;
-    parameter signed [7:0] B3_a2 = 8'sd0;
-
     parameter signed [7:0] ENV_b0 = 8'sd0;
     parameter signed [7:0] ENV_a1 = 8'sd0;
 
@@ -52,8 +47,6 @@ module tb_vocoder ();
         .B1_a1(B1_a1), .B1_a2(B1_a2),
         .B2_b0(B2_b0), .B2_b2(B2_b2),
         .B2_a1(B2_a1), .B2_a2(B2_a2),
-        .B3_b0(B3_b0), .B3_b2(B3_b2),
-        .B3_a1(B3_a1), .B3_a2(B3_a2),
         .ENV_b0(ENV_b0), .ENV_a1(ENV_a1)
     ) dut (
         .clk  (clk),

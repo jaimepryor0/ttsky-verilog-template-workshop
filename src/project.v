@@ -74,15 +74,14 @@ module tt_um_JAIMEPRYOR0_VGA_YAY(
     );
 
     // Coefficients (Q2.6) generated from vocoder_fixed_point.VOICE_BANDS at FS=48k.
-    // b1 is not a parameter -- vocoder.v skips that multiply phase entirely
-    // because every band's b1 quantises to zero at this filter design.
+    // Two-band design (B1: 200-1000 Hz, B2: 500-2000 Hz). b1 is not a
+    // parameter -- vocoder.v skips that multiply phase entirely because
+    // every band's b1 quantises to zero at this filter design.
     vocoder #(
         .B1_b0( 8'sd3  ), .B1_b2(-8'sd3 ),
         .B1_a1(-8'sd121), .B1_a2( 8'sd58),
         .B2_b0( 8'sd6  ), .B2_b2(-8'sd6 ),
         .B2_a1(-8'sd116), .B2_a2( 8'sd53),
-        .B3_b0( 8'sd14 ), .B3_b2(-8'sd14),
-        .B3_a1(-8'sd91 ), .B3_a2( 8'sd37),
         .ENV_b0(8'sd1),   .ENV_a1(-8'sd63)
     ) u_vocoder (
         .clk  (clk),
